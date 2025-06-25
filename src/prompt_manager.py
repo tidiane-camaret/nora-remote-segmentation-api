@@ -3,11 +3,23 @@ from nnInteractive.inference.inference_session import nnInteractiveInferenceSess
 import torch
 import os
 from huggingface_hub import snapshot_download
+import gzip
 
 REPO_ID = "nnInteractive/nnInteractive"
 MODEL_NAME = "nnInteractive_v1.0"  # Updated models may be available in the future
 DOWNLOAD_DIR = ".nninteractive_weights"  # Specify the download directory
 
+
+def segmentation_binary(seg_in, compress=False):
+    """
+    Convert a (boolean) segmentation array into packed bits and optionally compress.
+    """
+    seg_result = seg_in.astype(bool)  # Convert to bool type if not already
+    packed_segmentation = np.packbits(seg_result, axis=None)  # Pack into 1D byte array
+    packed_segmentation = packed_segmentation.tobytes()
+    if compress:
+        packed_segmentation = gzip.compress(packed_segmentation)
+    return packed_segmentation  # Convert to bytes for transmission
 
 class PromptManager:
     """
@@ -69,7 +81,7 @@ class PromptManager:
         )  # Must be 3D (x, y, z)
         self.session.set_target_buffer(self.target_tensor)
 
-    def set_segment(self, mask):
+    def set_segment(self, mask, run_prediction=False):
         """
         Sets or resets a segmentation (mask) on the server side.
         If mask is empty, resets the session's interactions.
@@ -81,7 +93,10 @@ class PromptManager:
             )  # Must be 3D (x, y, z)
             self.session.set_target_buffer(self.target_tensor)
         else:
-            self.session.add_initial_seg_interaction(mask)
+            self.session.add_initial_seg_interaction(mask, run_prediction=run_prediction)
+
+        if run_prediction:
+            return self.target_tensor.clone().cpu().detach().numpy()
 
     def add_point_interaction(self, point_coordinates, include_interaction):
         """

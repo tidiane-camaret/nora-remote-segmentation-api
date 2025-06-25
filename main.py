@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Response, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from src.prompt_manager import PromptManager
+from src.prompt_manager import PromptManager, segmentation_binary
 import uvicorn
 import argparse
 import numpy as np
@@ -42,9 +42,40 @@ async def upload_image(
     print(f"Reconstructed array shape: {img_array.shape}")
     print(f"Array dtype: {img_array.dtype}")
 
+    # Set the image in the prompt manager
     PROMPT_MANAGER.set_image(img_array)
 
     return {"status": "ok"}
+
+@app.post("/upload_roi")
+async def upload_roi(
+    file: UploadFile = File(...),
+    shape: str = Form(...),
+    dtype: str = Form(...)
+):
+    # Read the binary data
+    binary_data = await file.read()
+    
+    # Parse the shape from JSON string
+    shape_tuple = tuple(json.loads(shape))
+    
+    # Convert binary data to numpy array
+    # First create array from buffer, then reshape
+    roi_array = np.frombuffer(binary_data, dtype=np.dtype(dtype))
+    roi_array = roi_array.reshape(shape_tuple)
+    
+    print(f"Reconstructed array shape: {roi_array.shape}")
+    print(f"Array dtype: {roi_array.dtype}")
+
+    # Set the image in the prompt manager
+    seg_result = PROMPT_MANAGER.set_segment(roi_array, run_prediction=True)
+    compressed_bin = segmentation_binary(seg_result, compress=True)
+
+    return Response(
+        content=compressed_bin,
+        media_type="application/octet-stream",
+        headers={"Content-Encoding": "gzip"},
+    )
 
 def main():
     parser = argparse.ArgumentParser(description="Run the remote segmentation api server.")
