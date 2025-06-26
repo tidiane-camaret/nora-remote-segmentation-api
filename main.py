@@ -64,11 +64,15 @@ async def upload_roi(
     roi_array = np.frombuffer(binary_data, dtype=np.dtype(dtype))
     roi_array = roi_array.reshape(shape_tuple)
     
-    print(f"Reconstructed array shape: {roi_array.shape}")
-    print(f"Array dtype: {roi_array.dtype}")
+    print(f"roi min: {roi_array.min()}, max: {roi_array.max()}")
+    #roi_array = roi_array.astype(np.int32) 
+    print(f"roi shape: {roi_array.shape}, dtype: {roi_array.dtype}")
+
 
     # Set the image in the prompt manager
     seg_result = PROMPT_MANAGER.set_segment(roi_array, run_prediction=True)
+    print(f"seg_result counts: {np.unique(seg_result, return_counts=True)}")
+    print(f"seg_result shape: {seg_result.shape}, dtype: {seg_result.dtype}")
     compressed_bin = segmentation_binary(seg_result, compress=True)
 
     return Response(
