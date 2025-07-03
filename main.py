@@ -85,9 +85,16 @@ def main():
     parser = argparse.ArgumentParser(description="Run the remote segmentation api server.")
     parser.add_argument("--host", default="0.0.0.0", help="Host interface to bind to.")
     parser.add_argument("--port", type=int, default=1527, help="Port to listen on.")
+    parser.add_argument("--ssl_keyfile", type=str, default=None, help="Path to the SSL key file.")
+    parser.add_argument("--ssl_certfile", type=str, default=None, help="Path to the SSL certificate file.")
     args = parser.parse_args()
 
-    uvicorn.run("main:app", host=args.host, port=args.port, reload=True)
+    uvicorn.run("main:app", 
+                host=args.host, 
+                port=args.port, 
+                ssl_keyfile=args.ssl_keyfile,
+                ssl_certfile=args.ssl_certfile,
+                reload=True)
 
 
 if __name__ == "__main__":
