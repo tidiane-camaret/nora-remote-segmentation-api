@@ -49,7 +49,7 @@ class PromptManager:
         session = nnInteractiveInferenceSession(
             device=torch.device("cuda:0"),  # Set inference device
             use_torch_compile=False,  # Experimental: Not tested yet
-            verbose=True,
+            verbose=False,
             torch_n_threads=os.cpu_count(),  # Use available CPU cores
             do_autozoom=True,  # Enables AutoZoom for better patching
             use_pinned_memory=True,  # Optimizes GPU memory transfers

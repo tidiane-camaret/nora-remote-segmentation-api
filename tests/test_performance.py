@@ -52,15 +52,15 @@ for case_filename in tqdm(cases, desc="Evaluating Cases"):
         PROMPT_MANAGER.set_image(image)
         for class_idx, box in enumerate(boxes):
             gt_class = (gts == class_idx + 1)  
-            for prompt_type in "bbox_3d", "bbox_2d_slice":
+            for prompt_type in ["bbox_3d","bbox_z_midslice"]:
                 if prompt_type == "bbox_3d":
                     outer_point_one = [box["z_min"], box["z_mid_y_min"], box["z_mid_x_min"]]
-                    outer_point_two = [box["z_max"], box["z_mid_y_min"], box["z_mid_x_min"]]
+                    outer_point_two = [box["z_max"], box["z_mid_y_max"], box["z_mid_x_max"]]
 
-                elif prompt_type == "bbox_2d_slice":
+                elif prompt_type == "bbox_z_midslice":
                     z_mid = (box["z_min"] + box["z_max"]) / 2
                     outer_point_one = [z_mid, box["z_mid_y_min"], box["z_mid_x_min"]]
-                    outer_point_two = [z_mid + 1, box["z_mid_y_min"], box["z_mid_x_min"]]
+                    outer_point_two = [z_mid + 1, box["z_mid_y_max"], box["z_mid_x_max"]]
 
                 else:
                     raise ValueError(f"Unknown prompt type: {prompt_type}")
@@ -73,6 +73,8 @@ for case_filename in tqdm(cases, desc="Evaluating Cases"):
                 surface_distance = compute_surface_distances(gt_class, seg_result, spacing_mm=spacing)
                 nsd = compute_surface_dice_at_tolerance(surface_distance, tolerance_mm=2.0)
                 running_time = time.time() - time_start
+
+                print(f"Class {class_idx + 1}, Prompt Type: {prompt_type}, DSC: {dsc:.4f}, NSD: {nsd:.4f}, Running Time: {running_time:.2f} seconds")
                 
 
                 statistics_df = pd.concat([
@@ -90,7 +92,7 @@ for case_filename in tqdm(cases, desc="Evaluating Cases"):
 
                 PROMPT_MANAGER.session.reset_interactions()
             
-            break # Only process the first class for performance testing
+            # break # Only process the first class
         
         print(f"Case: {case_name}")
         print(f"Average DSC per prompt type: {statistics_df.groupby('prompt_type')['dsc'].mean()}")
