@@ -20,8 +20,9 @@ cases = sorted([f for f in os.listdir(img_dir) if f.endswith(".npz")])
 
 PROMPT_MANAGER = PromptManager()
 statistics_df = pd.DataFrame(columns=["case", "class_id", "prompt_type", "model", "dsc", "nsd", "running_time"])
-#random.shuffle(cases)
-cases = cases[:1]  # Limit cases for performance testing
+random.seed(42)  # For reproducibility
+random.shuffle(cases)
+cases = cases[:10]  # Limit cases for performance testing
 
 for case_filename in tqdm(cases, desc="Evaluating Cases"):
     print(f"Evaluating case: {case_filename}")
