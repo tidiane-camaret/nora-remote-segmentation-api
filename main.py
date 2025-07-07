@@ -20,7 +20,7 @@ PROMPT_MANAGER = PromptManager()
 
 @app.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"message": "Hello from Nora's segmentation server!"}
 
 @app.post("/upload_image")
 async def upload_image(

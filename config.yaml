@@ -1,0 +1,9 @@
+nora: 
+
+  DATA_DIR: "/nfs/data/nii/data1/Analysis/GPUnet/ANALYSIS_incontext/SegFM3D/data"
+  RESULTS_DIR: "/nfs/data/nii/data1/Analysis/GPUnet/ANALYSIS_incontext/nora-remote-segmentation-api/results"
+
+meta: 
+
+  DATA_DIR: "/work/dlclarge2/ndirt-SegFM3D/segfm3d_nora_team/data"
+  RESULTS_DIR: "/work/dlclarge2/ndirt-SegFM3D/nora-remote-segmentation-api/results"

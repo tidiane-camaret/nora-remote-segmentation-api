@@ -10,7 +10,11 @@ dependencies = [
     "nninteractive>=1.0.1",
     "numpy>=2.2.6",
     "python-multipart>=0.0.20",
+    "surface-distance",
     "torch>=2.7.1",
     "uvicorn>=0.34.3",
     "xxhash>=3.5.0",
 ]
+
+[tool.uv.sources]
+surface-distance = { path = "../repos/surface-distance" }
