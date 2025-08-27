@@ -5,6 +5,8 @@ import uvicorn
 import argparse
 import numpy as np
 import json
+from pydantic import BaseModel
+
 app = FastAPI()
 
 # Add CORS middleware # TODO : restrict origins in production
@@ -73,6 +75,37 @@ async def upload_roi(
     seg_result = PROMPT_MANAGER.set_segment(roi_array, run_prediction=True)
     print(f"seg_result counts: {np.unique(seg_result, return_counts=True)}")
     print(f"seg_result shape: {seg_result.shape}, dtype: {seg_result.dtype}")
+    compressed_bin = segmentation_binary(seg_result, compress=True)
+
+    return Response(
+        content=compressed_bin,
+        media_type="application/octet-stream",
+        headers={"Content-Encoding": "gzip"},
+    )
+
+
+#
+# -- Bounding Box interaction endpoint
+#
+class BBoxParams(BaseModel):
+    outer_point_one: list[int]
+    outer_point_two: list[int]
+    positive_click: bool
+
+@app.post("/add_bbox_interaction")
+async def add_bbox_interaction(params: BBoxParams):
+    """
+    Receives bounding box corners + positive/negative. Updates model & returns a mask.
+    """
+    print(f"Received bbox interaction: {params}")
+    
+
+    # Set the image in the prompt manager
+    seg_result = PROMPT_MANAGER.add_bbox_interaction(
+        params.outer_point_one,
+        params.outer_point_two,
+        include_interaction=params.positive_click,
+    )
     compressed_bin = segmentation_binary(seg_result, compress=True)
 
     return Response(
