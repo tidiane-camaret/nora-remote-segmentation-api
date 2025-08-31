@@ -1,9 +1,8 @@
-import numpy as np
-from nnInteractive.inference.inference_session import nnInteractiveInferenceSession
-import torch
-import os
-from huggingface_hub import snapshot_download
 import gzip
+import os
+
+import numpy as np
+import torch
 
 REPO_ID = "nnInteractive/nnInteractive"
 MODEL_NAME = "nnInteractive_v1.0"  # Updated models may be available in the future
@@ -21,6 +20,7 @@ def segmentation_binary(seg_in, compress=False):
         packed_segmentation = gzip.compress(packed_segmentation)
     return packed_segmentation  # Convert to bytes for transmission
 
+
 class PromptManager:
     """
     Manages the image, target tensor, and runs inference sessions for point, bbox,
@@ -31,13 +31,14 @@ class PromptManager:
         self.img = None
         self.target_tensor = None
 
-        self.download_weights()
         self.session = self.make_session()
 
     def download_weights(self):
         """
         Downloads only the files matching 'MODEL_NAME/*' into DOWNLOAD_DIR.
         """
+        from huggingface_hub import snapshot_download
+
         snapshot_download(
             repo_id=REPO_ID, allow_patterns=[f"{MODEL_NAME}/*"], local_dir=DOWNLOAD_DIR
         )
@@ -45,19 +46,33 @@ class PromptManager:
     def make_session(self):
         """
         Creates an nnInteractiveInferenceSession, points it at the downloaded model.
+        If MOCK_MODE is set, uses a mock session instead without GPU requirements.
         """
-        session = nnInteractiveInferenceSession(
-            device=torch.device("cuda:0"),  # Set inference device
-            use_torch_compile=False,  # Experimental: Not tested yet
-            verbose=False,
-            torch_n_threads=os.cpu_count(),  # Use available CPU cores
-            do_autozoom=True,  # Enables AutoZoom for better patching
-            use_pinned_memory=True,  # Optimizes GPU memory transfers
-        )
 
-        # Load the trained model
-        model_path = os.path.join(DOWNLOAD_DIR, MODEL_NAME)
-        session.initialize_from_trained_model_folder(model_path)
+        if os.environ.get("MOCK_MODE", "0") == "1":
+
+            print("Launching a mock session without GPU requirements")
+            from src.mock_session import MockSession
+
+            session = MockSession()
+        else:
+            from nnInteractive.inference.inference_session import (
+                nnInteractiveInferenceSession,
+            )
+
+            self.download_weights()
+            session = nnInteractiveInferenceSession(
+                device=torch.device("cuda:0"),  # Set inference device
+                use_torch_compile=False,  # Experimental: Not tested yet
+                verbose=False,
+                torch_n_threads=os.cpu_count(),  # Use available CPU cores
+                do_autozoom=True,  # Enables AutoZoom for better patching
+                use_pinned_memory=True,  # Optimizes GPU memory transfers
+            )
+
+            # Load the trained model
+            model_path = os.path.join(DOWNLOAD_DIR, MODEL_NAME)
+            session.initialize_from_trained_model_folder(model_path)
 
         return session
 
@@ -93,7 +108,9 @@ class PromptManager:
             )  # Must be 3D (x, y, z)
             self.session.set_target_buffer(self.target_tensor)
         else:
-            self.session.add_initial_seg_interaction(mask, run_prediction=run_prediction)
+            self.session.add_initial_seg_interaction(
+                mask, run_prediction=run_prediction
+            )
 
         if run_prediction:
             return self.target_tensor.clone().cpu().detach().numpy()

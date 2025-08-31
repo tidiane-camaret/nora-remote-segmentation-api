@@ -118,7 +118,7 @@ def get_error_if_img_not_set():
     if PROMPT_MANAGER.img is None:
         warnings.warn("There is no image in the server. Be sure to send it before")
         return {"status": "error", "message": "No image uploaded"}
-    
+
     return
 
 
@@ -291,7 +291,7 @@ async def upload_segment(
     error = get_error_if_img_not_set()
     if error is not None:
         return error
-    
+
     file_bytes = await file.read()
     decompressed = gzip.decompress(file_bytes)
     arr = np.load(io.BytesIO(decompressed))
@@ -316,7 +316,7 @@ async def add_point_interaction(params: PointParams):
     error = get_error_if_img_not_set()
     if error is not None:
         return error
-    
+
     t = time.time()
 
     seg_result = PROMPT_MANAGER.add_point_interaction(
@@ -349,7 +349,7 @@ async def add_bbox_interaction(params: BBoxParams):
     error = get_error_if_img_not_set()
     if error is not None:
         return error
-    
+
     t = time.time()
 
     seg_result = PROMPT_MANAGER.add_bbox_interaction(
@@ -383,7 +383,7 @@ async def add_lasso_interaction(
     error = get_error_if_img_not_set()
     if error is not None:
         return error
-    
+
     file_bytes = await file.read()
     mask, positive_click_bool = process_mask_and_click_input(file_bytes, positive_click)
 
@@ -415,7 +415,7 @@ async def add_scribble_interaction(
     error = get_error_if_img_not_set()
     if error is not None:
         return error
-    
+
     # Read the uploaded file bytes and decompress.
     file_bytes = await file.read()
 
@@ -436,7 +436,9 @@ async def add_scribble_interaction(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run the remote segmentation api server.")
+    parser = argparse.ArgumentParser(
+        description="Run the remote segmentation api server."
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Host interface to bind to.")
     parser.add_argument("--port", type=int, default=1527, help="Port to listen on.")
     args = parser.parse_args()
