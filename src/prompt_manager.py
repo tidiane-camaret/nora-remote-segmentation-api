@@ -157,6 +157,23 @@ class PromptManager:
             mask, include_interaction=include_interaction
         )
         return self.target_tensor.clone().cpu().detach().numpy()
+        
+    def create_mask_from_scribbles(self, scribble_coords, scribble_labels):
+        """
+        Creates a 3D mask from a list of scribble coordinates and labels.
+        """
+        if self.img is None:
+            raise ValueError("Image not set. Cannot determine mask shape.")
+
+        mask = np.zeros(self.img.shape[1:], dtype=np.uint8)
+        for coords, label in zip(scribble_coords, scribble_labels):
+            # Assuming coords are [z, y, x] and need to be integers
+            z, y, x = int(coords[0]), int(coords[1]), int(coords[2])
+
+            # Check bounds
+            if 0 <= z < mask.shape[0] and 0 <= y < mask.shape[1] and 0 <= x < mask.shape[2]:
+                mask[z, y, x] = label
+        return mask
 
     def add_scribble_interaction(self, mask, include_interaction):
         """

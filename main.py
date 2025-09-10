@@ -90,7 +90,7 @@ async def upload_roi(
 class BBoxParams(BaseModel):
     outer_point_one: list[int]
     outer_point_two: list[int]
-    positive_click: bool
+    positive_interaction: bool
 
 
 @app.post("/add_bbox_interaction")
@@ -104,7 +104,41 @@ async def add_bbox_interaction(params: BBoxParams):
     seg_result = PROMPT_MANAGER.add_bbox_interaction(
         params.outer_point_one,
         params.outer_point_two,
-        include_interaction=params.positive_click,
+        include_interaction=params.positive_interaction,
+    )
+    compressed_bin = segmentation_binary(seg_result, compress=True)
+
+    return Response(
+        content=compressed_bin,
+        media_type="application/octet-stream",
+        headers={"Content-Encoding": "gzip"},
+    )
+
+
+#
+# -- Scribble interaction endpoint
+#
+class ScribbleParams(BaseModel):
+    scribble_coords: list[list[float]]
+    scribble_labels: list[int]
+    positive_interaction: bool
+
+
+@app.post("/add_scribble_interaction")
+async def add_scribble_interaction(params: ScribbleParams):
+    """
+    Receives scribble coordinates and labels. Updates model & returns a mask.
+    """
+    print(f"Received scribble interaction: {len(params.scribble_coords)} points")
+
+    # Create a mask from scribble coordinates
+    mask = PROMPT_MANAGER.create_mask_from_scribbles(
+        params.scribble_coords, params.scribble_labels
+    )
+
+    # Call the scribble interaction method
+    seg_result = PROMPT_MANAGER.add_scribble_interaction(
+        mask, include_interaction=params.positive_interaction
     )
     compressed_bin = segmentation_binary(seg_result, compress=True)
 
