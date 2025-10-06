@@ -1,6 +1,7 @@
 import argparse
 import json
 
+import matplotlib.pyplot as plt
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, File, Form, Response, UploadFile
@@ -38,10 +39,19 @@ async def upload_image(
     # Parse the shape from JSON string
     shape_tuple = tuple(json.loads(shape))
 
+    print(f"Recieved shape: {shape_tuple}, dtype: {dtype}")
+
     # Convert binary data to numpy array
     # First create array from buffer, then reshape
     img_array = np.frombuffer(binary_data, dtype=np.dtype(dtype))
+
+    print(f"Received array of size: {img_array.shape}, dtype: {img_array.dtype}")
+
     img_array = img_array.reshape(shape_tuple)
+
+    mean_slice = np.mean(img_array, axis=0)
+
+    plt.imsave("mean_slice.png", mean_slice)
 
     print(f"Reconstructed array shape: {img_array.shape}")
     print(f"Array dtype: {img_array.dtype}")
