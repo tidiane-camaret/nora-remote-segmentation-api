@@ -1,5 +1,6 @@
 import argparse
 import json
+import os 
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,7 +27,7 @@ PROMPT_MANAGER = PromptManager()
 
 @app.get("/")
 async def root():
-    return {"message": "Hello from Nora's segmentation server!"}
+    return {"message": "Hello from Nora's segmentation server !"}
 
 
 @app.post("/upload_image")
@@ -164,7 +165,7 @@ def main():
         description="Run the remote segmentation api server."
     )
     parser.add_argument("--host", default="0.0.0.0", help="Host interface to bind to.")
-    parser.add_argument("--port", type=int, default=1527, help="Port to listen on.")
+    parser.add_argument("--port", type=int, default=1528, help="Port to listen on.")
     parser.add_argument(
         "--ssl_keyfile", type=str, default=None, help="Path to the SSL key file."
     )
@@ -183,6 +184,7 @@ def main():
         ssl_keyfile=args.ssl_keyfile,
         ssl_certfile=args.ssl_certfile,
         reload=True,
+        # reload_dirs=os.path.dirname(os.path.abspath(__file__))
     )
 
 

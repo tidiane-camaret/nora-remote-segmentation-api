@@ -14,3 +14,4 @@ wheels/
 
 certs/
 results/performance_statistics.csv
+*.png

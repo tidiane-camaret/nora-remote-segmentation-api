@@ -3,10 +3,7 @@ import os
 
 import numpy as np
 import torch
-
-REPO_ID = "nnInteractive/nnInteractive"
-MODEL_NAME = "nnInteractive_v1.0"  # Updated models may be available in the future
-DOWNLOAD_DIR = ".nninteractive_weights"  # Specify the download directory
+from src.utils import REPO_ID, MODEL_NAME, DOWNLOAD_DIR, download_model_weights
 
 
 def segmentation_binary(seg_in, compress=False):
@@ -33,16 +30,6 @@ class PromptManager:
 
         self.session = self.make_session()
 
-    def download_weights(self):
-        """
-        Downloads only the files matching 'MODEL_NAME/*' into DOWNLOAD_DIR.
-        """
-        from huggingface_hub import snapshot_download
-
-        snapshot_download(
-            repo_id=REPO_ID, allow_patterns=[f"{MODEL_NAME}/*"], local_dir=DOWNLOAD_DIR
-        )
-
     def make_session(self):
         """
         Creates an nnInteractiveInferenceSession, points it at the downloaded model.
@@ -59,8 +46,16 @@ class PromptManager:
             from nnInteractive.inference.inference_session import (
                 nnInteractiveInferenceSession,
             )
+            
+            model_path = os.path.join(DOWNLOAD_DIR, MODEL_NAME)
+            
+            if not os.path.exists(model_path) or not os.listdir(model_path):
+                print(f"Model weights not found in '{model_path}'.")
+                download_model_weights()
+            else:
+                print(f"Model weights found locally at '{model_path}'.")
 
-            self.download_weights()
+
             session = nnInteractiveInferenceSession(
                 device=torch.device("cuda:0"),  # Set inference device
                 use_torch_compile=False,  # Experimental: Not tested yet
