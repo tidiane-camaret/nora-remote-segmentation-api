@@ -94,7 +94,6 @@ class PromptManager:
     def set_segment(self, mask, run_prediction=False):
         """
         Sets or resets a segmentation (mask) on the server side.
-        If mask is empty, resets the session's interactions.
         """
         if np.sum(mask) == 0:
             self.session.reset_interactions()

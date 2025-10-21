@@ -109,8 +109,20 @@ async def upload_image(
 
 @app.post("/upload_roi")
 async def upload_roi(
-    file: UploadFile = File(...), shape: str = Form(...), dtype: str = Form(...)
+    file: UploadFile = File(...),
+    shape: str = Form(...),
+    dtype: str = Form(...),
+    image_hash: str = Form(...)
 ):
+    global CURRENT_IMAGE_HASH
+    # Check if the correct image is loaded, if not, load it.
+    if image_hash != CURRENT_IMAGE_HASH:
+        if image_hash not in IMAGE_CACHE:
+            return Response(status_code=404, content=f"Image with hash {image_hash} not found.")
+        print(f"Switching active image from {CURRENT_IMAGE_HASH} to {image_hash}")
+        PROMPT_MANAGER.set_image(IMAGE_CACHE[image_hash])
+        CURRENT_IMAGE_HASH = image_hash
+
     # Read the binary data
     binary_data = await file.read()
 
@@ -138,7 +150,6 @@ async def upload_roi(
         headers={"Content-Encoding": "gzip"},
     )
 
-
 #
 # -- Bounding Box interaction endpoint
 #
@@ -150,28 +161,45 @@ class BBoxParams(BaseModel):
 
 
 @app.post("/add_bbox_interaction")
-async def add_bbox_interaction(params: BBoxParams):
+async def add_bbox_interaction(
+    params: str = Form(...),
+    file: UploadFile = File(...),
+    shape: str = Form(...),
+    dtype: str = Form(...)
+):
     """
-    Receives bounding box corners + positive/negative. Updates model & returns a mask.
+    Receives bounding box corners, positive/negative interaction, and a base ROI mask.
+    Updates model & returns a refined mask.
     """
-
     global CURRENT_IMAGE_HASH
 
-    print(f"Received bbox interaction: {params}")
+    # Parse interaction parameters from JSON string
+    params_dict = json.loads(params)
+    bbox_params = BBoxParams(**params_dict)
+    print(f"Received bbox interaction: {bbox_params}")
 
     # Check if the correct image is loaded, if not, load it.
-    if params.image_hash != CURRENT_IMAGE_HASH:
-        if params.image_hash not in IMAGE_CACHE:
-            return Response(status_code=404, content=f"Image with hash {params.image_hash} not found.")
-        print(f"Switching active image from {CURRENT_IMAGE_HASH} to {params.image_hash}")
-        PROMPT_MANAGER.set_image(IMAGE_CACHE[params.image_hash])
-        CURRENT_IMAGE_HASH = params.image_hash
+    if bbox_params.image_hash != CURRENT_IMAGE_HASH:
+        if bbox_params.image_hash not in IMAGE_CACHE:
+            return Response(status_code=404, content=f"Image with hash {bbox_params.image_hash} not found.")
+        print(f"Switching active image from {CURRENT_IMAGE_HASH} to {bbox_params.image_hash}")
+        PROMPT_MANAGER.set_image(IMAGE_CACHE[bbox_params.image_hash])
+        CURRENT_IMAGE_HASH = bbox_params.image_hash
+
+    # --- Process the uploaded ROI mask ---
+    binary_data = await file.read()
+    shape_tuple = tuple(json.loads(shape))
+    roi_array = np.frombuffer(binary_data, dtype=np.dtype(dtype)).reshape(shape_tuple)
+    
+    # Set the base ROI mask in the prompt manager without running prediction yet
+    PROMPT_MANAGER.set_segment(roi_array, run_prediction=False)
+    print("Base ROI mask set for bbox interaction.")
 
     # Call the bounding box interaction method
     seg_result = PROMPT_MANAGER.add_bbox_interaction(
-        params.outer_point_one,
-        params.outer_point_two,
-        include_interaction=params.positive_interaction,
+        bbox_params.outer_point_one,
+        bbox_params.outer_point_two,
+        include_interaction=bbox_params.positive_interaction,
     )
     compressed_bin = segmentation_binary(seg_result, compress=True)
 
@@ -193,29 +221,56 @@ class ScribbleParams(BaseModel):
 
 
 @app.post("/add_scribble_interaction")
-async def add_scribble_interaction(params: ScribbleParams):
+async def add_scribble_interaction(
+    params: str = Form(...),
+    file: UploadFile = File(...),
+    shape: str = Form(...),
+    dtype: str = Form(...)
+):
     """
-    Receives scribble coordinates and labels. Updates model & returns a mask.
+    Receives scribble coordinates, labels, and a base ROI mask.
+    Updates model & returns a refined mask.
     """
     global CURRENT_IMAGE_HASH
 
-    print(f"Received scribble interaction: {len(params.scribble_coords)} points")
+    # Parse interaction parameters from JSON string
+    params_dict = json.loads(params)
+    scribble_params = ScribbleParams(**params_dict)
+    print(f"Received scribble interaction: {len(scribble_params.scribble_coords)} points")
+
     # Check if the correct image is loaded, if not, load it.
-    if params.image_hash != CURRENT_IMAGE_HASH:
-        if params.image_hash not in IMAGE_CACHE:
-            return Response(status_code=404, content=f"Image with hash {params.image_hash} not found.")
-        print(f"Switching active image from {CURRENT_IMAGE_HASH} to {params.image_hash}")
-        PROMPT_MANAGER.set_image(IMAGE_CACHE[params.image_hash])
-        CURRENT_IMAGE_HASH = params.image_hash
+    if scribble_params.image_hash != CURRENT_IMAGE_HASH:
+        if scribble_params.image_hash not in IMAGE_CACHE:
+            return Response(status_code=404, content=f"Image with hash {scribble_params.image_hash} not found.")
+        print(f"Switching active image from {CURRENT_IMAGE_HASH} to {scribble_params.image_hash}")
+        PROMPT_MANAGER.set_image(IMAGE_CACHE[scribble_params.image_hash])
+        CURRENT_IMAGE_HASH = scribble_params.image_hash
+
+    # --- Process the uploaded ROI mask ---
+    binary_data = await file.read()
+    shape_tuple = tuple(json.loads(shape))
+    roi_array = np.frombuffer(binary_data, dtype=np.dtype(dtype)).reshape(shape_tuple)
+
+    mean_roi_slice = np.mean(roi_array, axis=0)
+    plt.imsave("mean_roi_slice.png", mean_roi_slice)
+
+    # Set the base ROI mask in the prompt manager without running prediction yet
+    PROMPT_MANAGER.set_segment(roi_array, run_prediction=False)
+    print("Base ROI mask set for scribble interaction.")
 
     # Create a mask from scribble coordinates
-    mask = PROMPT_MANAGER.create_mask_from_scribbles(
-        params.scribble_coords, params.scribble_labels
+    scribbles_mask = PROMPT_MANAGER.create_mask_from_scribbles(
+        scribble_params.scribble_coords, scribble_params.scribble_labels
     )
+
+    mean_scribble_slice = np.mean(scribbles_mask, axis=0)
+    plt.imsave("mean_scribble_slice.png", mean_scribble_slice)
+
+
 
     # Call the scribble interaction method
     seg_result = PROMPT_MANAGER.add_scribble_interaction(
-        mask, include_interaction=params.positive_interaction
+        scribbles_mask, include_interaction=scribble_params.positive_interaction
     )
     compressed_bin = segmentation_binary(seg_result, compress=True)
 
@@ -224,7 +279,6 @@ async def add_scribble_interaction(params: ScribbleParams):
         media_type="application/octet-stream",
         headers={"Content-Encoding": "gzip"},
     )
-
 
 def main():
     parser = argparse.ArgumentParser(
