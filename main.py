@@ -13,11 +13,13 @@ from pydantic import BaseModel
 from src.prompt_manager import PromptManager, segmentation_binary
 
 # --- Cache Management ---
-class ImageCache:
-    def __init__(self, max_size_bytes: int):
+class ArrayCache:
+    """Generic cache for numpy arrays (images, ROIs, etc.)"""
+    def __init__(self, max_size_bytes: int, cache_name: str = "Array"):
         self._cache = OrderedDict()
         self.max_size_bytes = max_size_bytes
         self.current_size_bytes = 0
+        self.cache_name = cache_name
 
     def get(self, key: str) -> np.ndarray | None:
         if key in self._cache:
@@ -27,30 +29,31 @@ class ImageCache:
         return None
 
     def set(self, key: str, value: np.ndarray):
-        new_image_size = value.nbytes
-        if new_image_size > self.max_size_bytes:
-            print(f"Image {key} is larger than the cache size. Not caching.")
+        new_array_size = value.nbytes
+        if new_array_size > self.max_size_bytes:
+            print(f"{self.cache_name} {key} is larger than the cache size. Not caching.")
             return
 
         if key in self._cache:
             self.current_size_bytes -= self._cache[key].nbytes
             del self._cache[key]
 
-        while self.current_size_bytes + new_image_size > self.max_size_bytes:
+        while self.current_size_bytes + new_array_size > self.max_size_bytes:
             # FIFO eviction: remove the oldest item
             oldest_key, oldest_value = self._cache.popitem(last=False)
             self.current_size_bytes -= oldest_value.nbytes
-            print(f"Cache limit exceeded. Evicted {oldest_key} to free up {oldest_value.nbytes / (1024**2):.2f} MB.")
+            print(f"{self.cache_name} cache limit exceeded. Evicted {oldest_key} to free up {oldest_value.nbytes / (1024**2):.2f} MB.")
 
         self._cache[key] = value
-        self.current_size_bytes += new_image_size
-        print(f"Image {key} stored in cache. Current cache size: {self.current_size_bytes / (1024**2):.2f} MB")
+        self.current_size_bytes += new_array_size
+        print(f"{self.cache_name} {key} stored in cache. Current cache size: {self.current_size_bytes / (1024**2):.2f} MB")
 
     def __contains__(self, key: str) -> bool:
         return key in self._cache
 
 # --- Globals & App Initialization ---
-IMAGE_CACHE = ImageCache(max_size_bytes=1 * 1024 * 1024 * 1024)  # 1 GB
+IMAGE_CACHE = ArrayCache(max_size_bytes=1 * 1024 * 1024 * 1024, cache_name="Image")  # 1 GB
+ROI_CACHE = ArrayCache(max_size_bytes=512 * 1024 * 1024, cache_name="ROI")  # 512 MB
 PROMPT_MANAGER = PromptManager()
 CURRENT_IMAGE_HASH = None  # Tracks the image hash currently loaded in PROMPT_MANAGER
 
@@ -98,6 +101,11 @@ async def check_image_exists(image_hash: str):
     """Checks if an image with the given hash is already in the server's cache."""
     return {"exists": image_hash in IMAGE_CACHE}
 
+@app.get("/check_roi/{roi_hash}")
+async def check_roi_exists(roi_hash: str):
+    """Checks if an ROI with the given hash is already in the server's cache."""
+    return {"exists": roi_hash in ROI_CACHE}
+
 @app.post("/set_active_image/{image_hash}")
 async def set_active_image(image_hash: str, pm: PromptManager = Depends(ensure_active_image)):
     """Sets the active image for the global prompt manager from the cache."""
@@ -127,18 +135,64 @@ async def upload_image(
 
 @app.post("/upload_roi")
 async def upload_roi(
-    file: UploadFile = File(...),
+    shape: str = Form(...),
+    dtype: str = Form(...),
+    roi_hash: str = Form(...),
+    file: UploadFile = File(None)
+):
+    """
+    Uploads and caches an ROI without running segmentation.
+    Used to pre-cache ROI data for subsequent interaction requests.
+    """
+    # Check if ROI is already cached
+    cached_roi = ROI_CACHE.get(roi_hash)
+    if cached_roi is not None:
+        print(f"ROI {roi_hash} already in cache.")
+        return {"status": "ok", "message": "ROI already cached", "cached": True}
+    
+    # ROI not cached, need to upload
+    if file is None:
+        raise HTTPException(status_code=400, detail="ROI not in cache and no file provided")
+    
+    roi_array = await parse_file_upload(file, shape, dtype)
+    print(f"roi min: {roi_array.min()}, max: {roi_array.max()}")
+    print(f"roi shape: {roi_array.shape}, dtype: {roi_array.dtype}")
+    
+    # Cache the ROI
+    ROI_CACHE.set(roi_hash, roi_array)
+    
+    return {"status": "ok", "message": "ROI uploaded and cached", "cached": False}
+
+
+@app.post("/add_roi_interaction")
+async def add_roi_interaction(
     shape: str = Form(...),
     dtype: str = Form(...),
     image_hash: str = Form(...),
+    roi_hash: str = Form(...),
+    file: UploadFile = File(None)
 ):
+    """
+    Receives an ROI mask and runs segmentation refinement on it.
+    Similar to bbox/scribble interactions but uses the ROI as the only prompt.
+    """
     pm = await ensure_active_image(image_hash)
-    roi_array = await parse_file_upload(file, shape, dtype)
+    
+    # Check if ROI is already cached
+    cached_roi = ROI_CACHE.get(roi_hash)
+    if cached_roi is not None:
+        print(f"ROI {roi_hash} found in cache for roi interaction.")
+        roi_array = cached_roi
+    else:
+        if file is None:
+            raise HTTPException(status_code=400, detail="ROI not in cache and no file provided")
+        roi_array = await parse_file_upload(file, shape, dtype)
+        print(f"roi min: {roi_array.min()}, max: {roi_array.max()}")
+        print(f"roi shape: {roi_array.shape}, dtype: {roi_array.dtype}")
+        # Cache the ROI
+        ROI_CACHE.set(roi_hash, roi_array)
 
-    print(f"roi min: {roi_array.min()}, max: {roi_array.max()}")
-    print(f"roi shape: {roi_array.shape}, dtype: {roi_array.dtype}")
-
-    # Set the roi in the prompt manager
+    # Set the roi in the prompt manager and run prediction
     seg_result = pm.set_segment(roi_array, run_prediction=True)
     print(f"seg_result counts: {np.unique(seg_result, return_counts=True)}")
     print(f"seg_result shape: {seg_result.shape}, dtype: {seg_result.dtype}")
@@ -161,10 +215,11 @@ class BBoxParams(BaseModel):
 
 @app.post("/add_bbox_interaction")
 async def add_bbox_interaction(
-    file: UploadFile = File(...),
     shape: str = Form(...),
     dtype: str = Form(...),
-    params: str = Form(...)
+    params: str = Form(...),
+    roi_hash: str = Form(...),
+    file: UploadFile = File(None)
 ):
     """
     Receives bounding box corners, positive/negative interaction, and a base ROI mask.
@@ -178,7 +233,17 @@ async def add_bbox_interaction(
     pm = await ensure_active_image(bbox_params.image_hash)
 
     # --- Process the uploaded ROI mask ---
-    roi_array = await parse_file_upload(file, shape, dtype)
+    # Check if ROI is already cached
+    cached_roi = ROI_CACHE.get(roi_hash)
+    if cached_roi is not None:
+        print(f"ROI {roi_hash} found in cache for bbox interaction.")
+        roi_array = cached_roi
+    else:
+        if file is None:
+            raise HTTPException(status_code=400, detail="ROI not in cache and no file provided")
+        roi_array = await parse_file_upload(file, shape, dtype)
+        # Cache the ROI
+        ROI_CACHE.set(roi_hash, roi_array)
     
     # Set the base ROI mask in the prompt manager without running prediction yet
     pm.set_segment(roi_array, run_prediction=False)
@@ -211,10 +276,11 @@ class ScribbleParams(BaseModel):
 
 @app.post("/add_scribble_interaction")
 async def add_scribble_interaction(
-    file: UploadFile = File(...),
     shape: str = Form(...),
     dtype: str = Form(...),
-    params: str = Form(...)
+    params: str = Form(...),
+    roi_hash: str = Form(...),
+    file: UploadFile = File(None)
 ):
     """
     Receives scribble coordinates, labels, and a base ROI mask.
@@ -228,11 +294,19 @@ async def add_scribble_interaction(
     pm = await ensure_active_image(scribble_params.image_hash)
 
     # --- Process the uploaded ROI mask ---
-    roi_array = await parse_file_upload(file, shape, dtype)
-
-    mean_roi_slice = np.mean(roi_array, axis=0)
-
-    plt.imsave("mean_roi_slice.png", mean_roi_slice)
+    # Check if ROI is already cached
+    cached_roi = ROI_CACHE.get(roi_hash)
+    if cached_roi is not None:
+        print(f"ROI {roi_hash} found in cache for scribble interaction.")
+        roi_array = cached_roi
+    else:
+        if file is None:
+            raise HTTPException(status_code=400, detail="ROI not in cache and no file provided")
+        roi_array = await parse_file_upload(file, shape, dtype)
+        mean_roi_slice = np.mean(roi_array, axis=0)
+        plt.imsave("mean_roi_slice.png", mean_roi_slice)
+        # Cache the ROI
+        ROI_CACHE.set(roi_hash, roi_array)
 
     # Set the base ROI mask in the prompt manager without running prediction yet
     pm.set_segment(roi_array, run_prediction=False)
