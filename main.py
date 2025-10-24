@@ -52,8 +52,8 @@ class ArrayCache:
         return key in self._cache
 
 # --- Globals & App Initialization ---
-IMAGE_CACHE = ArrayCache(max_size_bytes=1 * 1024 * 1024 * 1024, cache_name="Image")  # 1 GB
-ROI_CACHE = ArrayCache(max_size_bytes=512 * 1024 * 1024, cache_name="ROI")  # 512 MB
+IMAGE_CACHE = ArrayCache(max_size_bytes=5 * 1024 * 1024 * 1024, cache_name="Image")  # 5 GB
+ROI_CACHE = ArrayCache(max_size_bytes=2 * 1024 * 1024 * 1024, cache_name="ROI")  # 2 GB
 PROMPT_MANAGER = PromptManager()
 CURRENT_IMAGE_HASH = None  # Tracks the image hash currently loaded in PROMPT_MANAGER
 
