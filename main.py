@@ -1,4 +1,5 @@
 import argparse
+import gzip
 import json
 import os
 from collections import OrderedDict
@@ -52,8 +53,8 @@ class ArrayCache:
         return key in self._cache
 
 # --- Globals & App Initialization ---
-IMAGE_CACHE = ArrayCache(max_size_bytes=5 * 1024 * 1024 * 1024, cache_name="Image")  # 5 GB
-ROI_CACHE = ArrayCache(max_size_bytes=2 * 1024 * 1024 * 1024, cache_name="ROI")  # 2 GB
+IMAGE_CACHE = ArrayCache(max_size_bytes=1 * 1024 * 1024 * 1024, cache_name="Image")  # 1 GB
+ROI_CACHE = ArrayCache(max_size_bytes=512 * 1024 * 1024, cache_name="ROI")  # 512 MB
 PROMPT_MANAGER = PromptManager()
 CURRENT_IMAGE_HASH = None  # Tracks the image hash currently loaded in PROMPT_MANAGER
 
@@ -85,9 +86,18 @@ async def ensure_active_image(image_hash: str):
     return PROMPT_MANAGER
 
 # --- Helper Functions ---
-async def parse_file_upload(file: UploadFile, shape: str, dtype: str) -> np.ndarray:
-    """Helper to parse uploaded numpy array from binary file."""
+async def parse_file_upload(file: UploadFile, shape: str, dtype: str, compressed: str = None) -> np.ndarray:
+    """Helper to parse uploaded numpy array from binary file, with optional gzip decompression."""
     binary_data = await file.read()
+
+    # Check if data is compressed and decompress if needed
+    if compressed == "gzip":
+        original_size = len(binary_data)
+        binary_data = gzip.decompress(binary_data)
+        decompressed_size = len(binary_data)
+        compression_ratio = ((1 - original_size / decompressed_size) * 100)
+        print(f"Decompressed ROI: {original_size} bytes -> {decompressed_size} bytes ({compression_ratio:.2f}% compression)")
+
     shape_tuple = tuple(json.loads(shape))
     return np.frombuffer(binary_data, dtype=np.dtype(dtype)).reshape(shape_tuple)
 
@@ -138,7 +148,8 @@ async def upload_roi(
     shape: str = Form(...),
     dtype: str = Form(...),
     roi_hash: str = Form(...),
-    file: UploadFile = File(None)
+    file: UploadFile = File(None),
+    compressed: str = Form(None)
 ):
     """
     Uploads and caches an ROI without running segmentation.
@@ -149,18 +160,18 @@ async def upload_roi(
     if cached_roi is not None:
         print(f"ROI {roi_hash} already in cache.")
         return {"status": "ok", "message": "ROI already cached", "cached": True}
-    
+
     # ROI not cached, need to upload
     if file is None:
         raise HTTPException(status_code=400, detail="ROI not in cache and no file provided")
-    
-    roi_array = await parse_file_upload(file, shape, dtype)
+
+    roi_array = await parse_file_upload(file, shape, dtype, compressed)
     print(f"roi min: {roi_array.min()}, max: {roi_array.max()}")
     print(f"roi shape: {roi_array.shape}, dtype: {roi_array.dtype}")
-    
+
     # Cache the ROI
     ROI_CACHE.set(roi_hash, roi_array)
-    
+
     return {"status": "ok", "message": "ROI uploaded and cached", "cached": False}
 
 
@@ -170,14 +181,15 @@ async def add_roi_interaction(
     dtype: str = Form(...),
     image_hash: str = Form(...),
     roi_hash: str = Form(...),
-    file: UploadFile = File(None)
+    file: UploadFile = File(None),
+    compressed: str = Form(None)
 ):
     """
     Receives an ROI mask and runs segmentation refinement on it.
     Similar to bbox/scribble interactions but uses the ROI as the only prompt.
     """
     pm = await ensure_active_image(image_hash)
-    
+
     # Check if ROI is already cached
     cached_roi = ROI_CACHE.get(roi_hash)
     if cached_roi is not None:
@@ -186,7 +198,7 @@ async def add_roi_interaction(
     else:
         if file is None:
             raise HTTPException(status_code=400, detail="ROI not in cache and no file provided")
-        roi_array = await parse_file_upload(file, shape, dtype)
+        roi_array = await parse_file_upload(file, shape, dtype, compressed)
         print(f"roi min: {roi_array.min()}, max: {roi_array.max()}")
         print(f"roi shape: {roi_array.shape}, dtype: {roi_array.dtype}")
         # Cache the ROI
@@ -219,7 +231,8 @@ async def add_bbox_interaction(
     dtype: str = Form(...),
     params: str = Form(...),
     roi_hash: str = Form(...),
-    file: UploadFile = File(None)
+    file: UploadFile = File(None),
+    compressed: str = Form(None)
 ):
     """
     Receives bounding box corners, positive/negative interaction, and a base ROI mask.
@@ -241,10 +254,10 @@ async def add_bbox_interaction(
     else:
         if file is None:
             raise HTTPException(status_code=400, detail="ROI not in cache and no file provided")
-        roi_array = await parse_file_upload(file, shape, dtype)
+        roi_array = await parse_file_upload(file, shape, dtype, compressed)
         # Cache the ROI
         ROI_CACHE.set(roi_hash, roi_array)
-    
+
     # Set the base ROI mask in the prompt manager without running prediction yet
     pm.set_segment(roi_array, run_prediction=False)
     print("Base ROI mask set for bbox interaction.")
@@ -280,7 +293,8 @@ async def add_scribble_interaction(
     dtype: str = Form(...),
     params: str = Form(...),
     roi_hash: str = Form(...),
-    file: UploadFile = File(None)
+    file: UploadFile = File(None),
+    compressed: str = Form(None)
 ):
     """
     Receives scribble coordinates, labels, and a base ROI mask.
@@ -302,7 +316,7 @@ async def add_scribble_interaction(
     else:
         if file is None:
             raise HTTPException(status_code=400, detail="ROI not in cache and no file provided")
-        roi_array = await parse_file_upload(file, shape, dtype)
+        roi_array = await parse_file_upload(file, shape, dtype, compressed)
         mean_roi_slice = np.mean(roi_array, axis=0)
         plt.imsave("mean_roi_slice.png", mean_roi_slice)
         # Cache the ROI
