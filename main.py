@@ -6,13 +6,21 @@ from collections import OrderedDict
 
 import matplotlib.pyplot as plt
 import numpy as np
+import psutil
 import uvicorn
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
 from src.prompt_manager import PromptManager, segmentation_binary
 
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    GPU_AVAILABLE = True
+except:
+    GPU_AVAILABLE = False
+    logger_temp = logging.getLogger(__name__)
+    logger_temp.warning("GPU monitoring not available - pynvml failed to initialize")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,6 +28,31 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+def log_memory_usage(context: str = ""):
+    """Log current RAM and VRAM usage."""
+    # RAM usage
+    ram = psutil.virtual_memory()
+    ram_used_gb = ram.used / (1024**3)
+    ram_percent = ram.percent
+    
+    log_msg = f"[MEMORY {context}] RAM: {ram_used_gb:.2f} GB ({ram_percent:.1f}%)"
+    
+    # VRAM usage (if GPU available)
+    if GPU_AVAILABLE:
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)  # GPU 0
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            vram_used_gb = info.used / (1024**3)
+            vram_total_gb = info.total / (1024**3)
+            vram_percent = (info.used / info.total) * 100
+            log_msg += f" | VRAM: {vram_used_gb:.2f}/{vram_total_gb:.2f} GB ({vram_percent:.1f}%)"
+        except Exception as e:
+            log_msg += f" | VRAM: Error - {str(e)}"
+    else:
+        log_msg += " | VRAM: N/A"
+    
+    logger.info(log_msg)
 
 # --- Cache Management ---
 class ArrayCache:
@@ -40,22 +73,20 @@ class ArrayCache:
     def set(self, key: str, value: np.ndarray):
         new_array_size = value.nbytes
         if new_array_size > self.max_size_bytes:
-            print(f"{self.cache_name} {key} is larger than the cache size. Not caching.")
-            return
+            raise ValueError(f"Array size {new_array_size} exceeds max cache size {self.max_size_bytes}")
 
         if key in self._cache:
-            self.current_size_bytes -= self._cache[key].nbytes
-            del self._cache[key]
+            old_size = self._cache[key].nbytes
+            self.current_size_bytes -= old_size
 
         while self.current_size_bytes + new_array_size > self.max_size_bytes:
-            # FIFO eviction: remove the oldest item
-            oldest_key, oldest_value = self._cache.popitem(last=False)
-            self.current_size_bytes -= oldest_value.nbytes
-            print(f"{self.cache_name} cache limit exceeded. Evicted {oldest_key} to free up {oldest_value.nbytes / (1024**2):.2f} MB.")
+            evicted_key, evicted_value = self._cache.popitem(last=False)
+            self.current_size_bytes -= evicted_value.nbytes
+            logger.info(f"[CACHE {self.cache_name}] Evicted: {evicted_key}")
 
         self._cache[key] = value
         self.current_size_bytes += new_array_size
-        print(f"{self.cache_name} {key} stored in cache. Current cache size: {self.current_size_bytes / (1024**2):.2f} MB")
+        logger.info(f"[CACHE {self.cache_name}] Stored: {key} | Cache size: {self.current_size_bytes / (1024**2):.2f} MB")
 
     def __contains__(self, key: str) -> bool:
         return key in self._cache
@@ -86,9 +117,9 @@ async def ensure_active_image(image_hash: str):
     if image_hash != CURRENT_IMAGE_HASH:
         image_data = IMAGE_CACHE.get(image_hash)
         if image_data is None:
-            raise HTTPException(status_code=404, detail=f"Image with hash {image_hash} not found in cache.")
+            raise HTTPException(status_code=404, detail=f"Image {image_hash} not found in cache")
         
-        print(f"Switching active image from {CURRENT_IMAGE_HASH} to {image_hash}")
+        logger.info(f"Switching active image from {CURRENT_IMAGE_HASH} to {image_hash}")
         PROMPT_MANAGER.set_image(image_data)
         CURRENT_IMAGE_HASH = image_hash
     return PROMPT_MANAGER
@@ -138,6 +169,7 @@ async def upload_image(
 ):  
     global CURRENT_IMAGE_HASH
     logger.info(f"=== UPLOAD IMAGE START === hash: {image_hash}")
+    log_memory_usage("BEFORE")
 
     img_array = await parse_file_upload(file, shape, dtype)
 
@@ -153,6 +185,7 @@ async def upload_image(
     PROMPT_MANAGER.set_image(img_array)
     CURRENT_IMAGE_HASH = image_hash
 
+    log_memory_usage("AFTER")
     logger.info(f"=== UPLOAD IMAGE SUCCESS === hash: {image_hash}")
 
     return {"status": "ok"}
@@ -170,22 +203,29 @@ async def upload_roi(
     Uploads and caches an ROI without running segmentation.
     Used to pre-cache ROI data for subsequent interaction requests.
     """
+    logger.info(f"=== UPLOAD ROI START === hash: {roi_hash}")
+    log_memory_usage("BEFORE")
+    
     # Check if ROI is already cached
     cached_roi = ROI_CACHE.get(roi_hash)
     if cached_roi is not None:
-        logger.info(f"ROI {roi_hash} already in cache.")
-        return {"status": "ok"}
+        logger.info(f"ROI {roi_hash} found in cache")
+        return {"status": "ok", "message": "ROI already cached", "cached": True}
 
     # ROI not cached, need to upload
     if file is None:
         raise HTTPException(status_code=400, detail="ROI not in cache and no file provided")
 
     roi_array = await parse_file_upload(file, shape, dtype, compressed)
-    logger.info(f"Uploaded ROI details - shape: {roi_array.shape}, dtype: {roi_array.dtype}, min: {roi_array.min()}, max: {roi_array.max()}")
+    size_mb = roi_array.nbytes / (1024**2)
+    logger.info(f"ROI details - shape: {roi_array.shape}, dtype: {roi_array.dtype}, size: {size_mb:.2f} MB, min: {roi_array.min()}, max: {roi_array.max()}")
 
     # Cache the ROI
     ROI_CACHE.set(roi_hash, roi_array)
 
+    log_memory_usage("AFTER")
+    logger.info(f"=== UPLOAD ROI SUCCESS === hash: {roi_hash}")
+    
     return {"status": "ok"}
 
 
@@ -202,6 +242,9 @@ async def add_roi_interaction(
     Receives an ROI mask and runs segmentation refinement on it.
     Similar to bbox/scribble interactions but uses the ROI as the only prompt.
     """
+    logger.info(f"=== ADD ROI INTERACTION START === image: {image_hash}, roi: {roi_hash}")
+    log_memory_usage("BEFORE")
+    
     pm = await ensure_active_image(image_hash)
 
     # Check if ROI is already cached
@@ -224,6 +267,9 @@ async def add_roi_interaction(
     logger.info(f"seg_result shape: {seg_result.shape}, dtype: {seg_result.dtype}")
 
     compressed_bin = segmentation_binary(seg_result, compress=True)
+
+    log_memory_usage("AFTER")
+    logger.info(f"=== ADD ROI INTERACTION SUCCESS ===")
 
     return Response(
         content=compressed_bin,
@@ -255,7 +301,8 @@ async def add_bbox_interaction(
     """
     # Parse interaction parameters from JSON string
     bbox_params = BBoxParams(**json.loads(params))
-    logger.info(f"Received bbox interaction: {bbox_params}")
+    logger.info(f"=== ADD BBOX INTERACTION START === image: {bbox_params.image_hash}, roi: {roi_hash}")
+    log_memory_usage("BEFORE")
 
     # Ensure the correct image is active
     pm = await ensure_active_image(bbox_params.image_hash)
@@ -284,6 +331,9 @@ async def add_bbox_interaction(
         include_interaction=bbox_params.positive_interaction,
     )
     compressed_bin = segmentation_binary(seg_result, compress=True)
+
+    log_memory_usage("AFTER")
+    logger.info("=== ADD BBOX INTERACTION SUCCESS ===")
 
     return Response(
         content=compressed_bin,
@@ -317,8 +367,9 @@ async def add_scribble_interaction(
     """
     # Parse interaction parameters from JSON string
     scribble_params = ScribbleParams(**json.loads(params))
-    logger.info(f"Received scribble interaction: {len(scribble_params.scribble_coords)} points")
-    logger.info(f"Scribble label: {scribble_params.scribble_labels[0]}")
+    logger.info(f"=== ADD SCRIBBLE INTERACTION START === image: {scribble_params.image_hash}, roi: {roi_hash}")
+    logger.info(f"Scribble details: {len(scribble_params.scribble_coords)} points, label: {scribble_params.scribble_labels[0]}")
+    log_memory_usage("BEFORE")
 
     # Ensure the correct image is active
     pm = await ensure_active_image(scribble_params.image_hash)
@@ -355,6 +406,9 @@ async def add_scribble_interaction(
         scribbles_mask, include_interaction=scribble_params.positive_interaction
     )
     compressed_bin = segmentation_binary(seg_result, compress=True)
+
+    log_memory_usage("AFTER")
+    logger.info("=== ADD SCRIBBLE INTERACTION SUCCESS ===")
 
     return Response(
         content=compressed_bin,
