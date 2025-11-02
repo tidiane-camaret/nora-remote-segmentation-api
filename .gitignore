@@ -13,5 +13,6 @@ wheels/
 .nninteractive_weights/
 
 certs/
+logs/
 results/performance_statistics.csv
 *.png

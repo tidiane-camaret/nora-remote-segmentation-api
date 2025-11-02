@@ -3,6 +3,8 @@ import gzip
 import json
 import logging
 from collections import OrderedDict
+from datetime import datetime
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,15 +21,49 @@ try:
     GPU_AVAILABLE = True
 except:
     GPU_AVAILABLE = False
-    logger_temp = logging.getLogger(__name__)
-    logger_temp.warning("GPU monitoring not available - pynvml failed to initialize")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
+def setup_logging(log_to_file: bool = False, log_level: str = "INFO"):
+    """
+    Configure logging for the application.
+    
+    Args:
+        log_to_file: If True, logs will be written to a file. If False, only console output (default).
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    """
+    handlers = []
+    
+    # Always add console handler
+    handlers.append(logging.StreamHandler())
+    
+    # Optionally add file handler
+    if log_to_file:
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        log_filename = log_dir / f"segmentation_api_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        handlers.append(logging.FileHandler(log_filename, encoding='utf-8'))
+    
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper()),
+        format='%(asctime)s | %(levelname)s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=handlers,
+        force=True  # Override any existing configuration
+    )
+    
+    logger = logging.getLogger(__name__)
+    if log_to_file:
+        logger.info(f"Logging initialized. Log file: {log_filename}")
+    else:
+        logger.info("Logging initialized. Console only (file logging disabled)")
+    
+    if not GPU_AVAILABLE:
+        logger.warning("GPU monitoring not available - pynvml failed to initialize")
+    
+    return logger
+
+# Initialize with default settings (will be reconfigured in main() with CLI args)
+logger = setup_logging()
 
 def log_memory_usage(context: str = ""):
     """Log current RAM and VRAM usage."""
@@ -431,7 +467,29 @@ def main():
         default=None,
         help="Path to the SSL certificate file.",
     )
+    parser.add_argument(
+        "--log-file",
+        action="store_true",
+        help="Enable logging to file (default: console only).",
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level (default: INFO)",
+    )
     args = parser.parse_args()
+
+    # Reconfigure logging with CLI arguments
+    global logger
+    logger = setup_logging(log_to_file=args.log_file, log_level=args.log_level)
+    
+    # Log startup configuration
+    logger.info(f"Starting server on {args.host}:{args.port}")
+    logger.info(f"Image cache max size: {IMAGE_CACHE.max_size_bytes / (1024**3):.2f} GB")
+    logger.info(f"ROI cache max size: {ROI_CACHE.max_size_bytes / (1024**3):.2f} GB")
+    logger.info(f"GPU available: {GPU_AVAILABLE}")
 
     uvicorn.run(
         "main:app",
