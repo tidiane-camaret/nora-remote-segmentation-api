@@ -62,8 +62,8 @@ def setup_logging(log_to_file: bool = False, log_level: str = "INFO"):
     
     return logger
 
-# Initialize with default settings (will be reconfigured in main() with CLI args)
-logger = setup_logging()
+# Initialize logger variable (will be properly configured in main())
+logger = logging.getLogger(__name__)
 
 def log_memory_usage(context: str = ""):
     """Log current RAM and VRAM usage."""
@@ -481,15 +481,17 @@ def main():
     )
     args = parser.parse_args()
 
-    # Reconfigure logging with CLI arguments
-    global logger
-    logger = setup_logging(log_to_file=args.log_file, log_level=args.log_level)
+    # Configure logging with CLI arguments
+    setup_logging(log_to_file=args.log_file, log_level=args.log_level)
+    
+    # Get logger after setup
+    app_logger = logging.getLogger(__name__)
     
     # Log startup configuration
-    logger.info(f"Starting server on {args.host}:{args.port}")
-    logger.info(f"Image cache max size: {IMAGE_CACHE.max_size_bytes / (1024**3):.2f} GB")
-    logger.info(f"ROI cache max size: {ROI_CACHE.max_size_bytes / (1024**3):.2f} GB")
-    logger.info(f"GPU available: {GPU_AVAILABLE}")
+    app_logger.info(f"Starting server on {args.host}:{args.port}")
+    app_logger.info(f"Image cache max size: {IMAGE_CACHE.max_size_bytes / (1024**3):.2f} GB")
+    app_logger.info(f"ROI cache max size: {ROI_CACHE.max_size_bytes / (1024**3):.2f} GB")
+    app_logger.info(f"GPU available: {GPU_AVAILABLE}")
 
     uvicorn.run(
         "main:app",
