@@ -1,7 +1,7 @@
 import argparse
 import gzip
 import json
-import os
+import logging
 from collections import OrderedDict
 
 import matplotlib.pyplot as plt
@@ -12,6 +12,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from src.prompt_manager import PromptManager, segmentation_binary
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # --- Cache Management ---
 class ArrayCache:
@@ -123,13 +131,19 @@ async def set_active_image(image_hash: str, pm: PromptManager = Depends(ensure_a
 
 @app.post("/upload_image")
 async def upload_image(
-    file: UploadFile = File(...), shape: str = Form(...), dtype: str = Form(...), image_hash: str = Form(...)
+    file: UploadFile = File(...), 
+    shape: str = Form(...), 
+    dtype: str = Form(...), 
+    image_hash: str = Form(...)
 ):  
     global CURRENT_IMAGE_HASH
+    logger.info(f"=== UPLOAD IMAGE START === hash: {image_hash}")
+
     img_array = await parse_file_upload(file, shape, dtype)
 
-    print(f"Received array of size: {img_array.shape}, dtype: {img_array.dtype}")
-
+    size_mb = img_array.nbytes / (1024**2)
+    logger.info(f"Image details - shape: {img_array.shape}, dtype: {img_array.dtype}, size: {size_mb:.2f} MB")
+    
     IMAGE_CACHE.set(image_hash, img_array)
 
     mean_slice = np.mean(img_array, axis=0)
@@ -138,7 +152,8 @@ async def upload_image(
     # Set the image in the prompt manager
     PROMPT_MANAGER.set_image(img_array)
     CURRENT_IMAGE_HASH = image_hash
-    print(f"Image {image_hash} set as active.")
+
+    logger.info(f"=== UPLOAD IMAGE SUCCESS === hash: {image_hash}")
 
     return {"status": "ok"}
 
@@ -158,21 +173,20 @@ async def upload_roi(
     # Check if ROI is already cached
     cached_roi = ROI_CACHE.get(roi_hash)
     if cached_roi is not None:
-        print(f"ROI {roi_hash} already in cache.")
-        return {"status": "ok", "message": "ROI already cached", "cached": True}
+        logger.info(f"ROI {roi_hash} already in cache.")
+        return {"status": "ok"}
 
     # ROI not cached, need to upload
     if file is None:
         raise HTTPException(status_code=400, detail="ROI not in cache and no file provided")
 
     roi_array = await parse_file_upload(file, shape, dtype, compressed)
-    print(f"roi min: {roi_array.min()}, max: {roi_array.max()}")
-    print(f"roi shape: {roi_array.shape}, dtype: {roi_array.dtype}")
+    logger.info(f"Uploaded ROI details - shape: {roi_array.shape}, dtype: {roi_array.dtype}, min: {roi_array.min()}, max: {roi_array.max()}")
 
     # Cache the ROI
     ROI_CACHE.set(roi_hash, roi_array)
 
-    return {"status": "ok", "message": "ROI uploaded and cached", "cached": False}
+    return {"status": "ok"}
 
 
 @app.post("/add_roi_interaction")
@@ -193,21 +207,22 @@ async def add_roi_interaction(
     # Check if ROI is already cached
     cached_roi = ROI_CACHE.get(roi_hash)
     if cached_roi is not None:
-        print(f"ROI {roi_hash} found in cache for roi interaction.")
+        logger.info(f"ROI {roi_hash} found in cache for roi interaction.")
         roi_array = cached_roi
     else:
         if file is None:
             raise HTTPException(status_code=400, detail="ROI not in cache and no file provided")
+        
         roi_array = await parse_file_upload(file, shape, dtype, compressed)
-        print(f"roi min: {roi_array.min()}, max: {roi_array.max()}")
-        print(f"roi shape: {roi_array.shape}, dtype: {roi_array.dtype}")
+        logger.info(f"Uploaded ROI details - shape: {roi_array.shape}, dtype: {roi_array.dtype}, min: {roi_array.min()}, max: {roi_array.max()}")
         # Cache the ROI
         ROI_CACHE.set(roi_hash, roi_array)
 
     # Set the roi in the prompt manager and run prediction
     seg_result = pm.set_segment(roi_array, run_prediction=True)
-    print(f"seg_result counts: {np.unique(seg_result, return_counts=True)}")
-    print(f"seg_result shape: {seg_result.shape}, dtype: {seg_result.dtype}")
+    logger.info(f"seg_result counts: {np.unique(seg_result, return_counts=True)}")
+    logger.info(f"seg_result shape: {seg_result.shape}, dtype: {seg_result.dtype}")
+
     compressed_bin = segmentation_binary(seg_result, compress=True)
 
     return Response(
@@ -240,7 +255,7 @@ async def add_bbox_interaction(
     """
     # Parse interaction parameters from JSON string
     bbox_params = BBoxParams(**json.loads(params))
-    print(f"Received bbox interaction: {bbox_params}")
+    logger.info(f"Received bbox interaction: {bbox_params}")
 
     # Ensure the correct image is active
     pm = await ensure_active_image(bbox_params.image_hash)
@@ -249,7 +264,7 @@ async def add_bbox_interaction(
     # Check if ROI is already cached
     cached_roi = ROI_CACHE.get(roi_hash)
     if cached_roi is not None:
-        print(f"ROI {roi_hash} found in cache for bbox interaction.")
+        logger.info(f"ROI {roi_hash} found in cache for bbox interaction.")
         roi_array = cached_roi
     else:
         if file is None:
@@ -260,7 +275,7 @@ async def add_bbox_interaction(
 
     # Set the base ROI mask in the prompt manager without running prediction yet
     pm.set_segment(roi_array, run_prediction=False)
-    print("Base ROI mask set for bbox interaction.")
+    logger.info("Base ROI mask set for bbox interaction.")
 
     # Call the bounding box interaction method
     seg_result = pm.add_bbox_interaction(
@@ -302,7 +317,8 @@ async def add_scribble_interaction(
     """
     # Parse interaction parameters from JSON string
     scribble_params = ScribbleParams(**json.loads(params))
-    print(f"Received scribble interaction: {len(scribble_params.scribble_coords)} points")
+    logger.info(f"Received scribble interaction: {len(scribble_params.scribble_coords)} points")
+    logger.info(f"Scribble label: {scribble_params.scribble_labels[0]}")
 
     # Ensure the correct image is active
     pm = await ensure_active_image(scribble_params.image_hash)
@@ -311,7 +327,7 @@ async def add_scribble_interaction(
     # Check if ROI is already cached
     cached_roi = ROI_CACHE.get(roi_hash)
     if cached_roi is not None:
-        print(f"ROI {roi_hash} found in cache for scribble interaction.")
+        logger.info(f"ROI {roi_hash} found in cache for scribble interaction.")
         roi_array = cached_roi
     else:
         if file is None:
@@ -324,7 +340,7 @@ async def add_scribble_interaction(
 
     # Set the base ROI mask in the prompt manager without running prediction yet
     pm.set_segment(roi_array, run_prediction=False)
-    print("Base ROI mask set for scribble interaction.")
+    logger.info("Base ROI mask set for scribble interaction.")
 
     # Create a mask from scribble coordinates
     scribbles_mask = pm.create_mask_from_scribbles(
