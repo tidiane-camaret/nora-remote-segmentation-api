@@ -285,40 +285,78 @@ def log_memory_usage(context: str = ""):
 class ArrayCache:
     """Generic cache for numpy arrays (images, ROIs, etc.)"""
 
-    def __init__(self, max_size_bytes: int, cache_name: str = "Array"):
+    def __init__(self, max_size_bytes: int, cache_name: str = "Array", compress: bool = False):
         self._cache = OrderedDict()
         self.max_size_bytes = max_size_bytes
         self.current_size_bytes = 0
         self.cache_name = cache_name
+        self.compress = compress
 
     def get(self, key: str) -> np.ndarray | None:
         if key in self._cache:
             # Move to end to mark as recently used
             self._cache.move_to_end(key)
-            return self._cache[key]
+
+            if self.compress:
+                # Decompress and reconstruct array
+                compressed_data, shape, dtype = self._cache[key]
+                return deserialize_array(compressed_data, shape, dtype, compressed=True, log_stats=False)
+            else:
+                return self._cache[key]
         return None
 
     def set(self, key: str, value: np.ndarray):
         logger = logging.getLogger(__name__)
-        new_array_size = value.nbytes
-        if new_array_size > self.max_size_bytes:
+
+        if self.compress:
+            # Compress the array and store with metadata
+            compressed_data = serialize_array(value, compress=True, pack_bits=False)
+            new_item_size = len(compressed_data)
+            stored_value = (compressed_data, value.shape, str(value.dtype))
+
+            original_size = value.nbytes
+            compression_ratio = (1 - new_item_size / original_size) * 100
+            logger.debug(
+                f"[CACHE {self.cache_name}] Compressed {key}: "
+                f"{original_size / (1024**2):.2f} MB -> {new_item_size / (1024**2):.2f} MB "
+                f"({compression_ratio:.1f}% compression)"
+            )
+        else:
+            # Store array directly
+            new_item_size = value.nbytes
+            stored_value = value
+
+        if new_item_size > self.max_size_bytes:
             raise ValueError(
-                f"Array size {new_array_size} exceeds max cache size {self.max_size_bytes}"
+                f"Item size {new_item_size / (1024**2):.2f} MB exceeds max cache size {self.max_size_bytes / (1024**2):.2f} MB"
             )
 
+        # Remove old item if key exists
         if key in self._cache:
-            old_size = self._cache[key].nbytes
+            if self.compress:
+                old_compressed_data, _, _ = self._cache[key]
+                old_size = len(old_compressed_data)
+            else:
+                old_size = self._cache[key].nbytes
             self.current_size_bytes -= old_size
 
-        while self.current_size_bytes + new_array_size > self.max_size_bytes:
+        # Evict items if necessary
+        while self.current_size_bytes + new_item_size > self.max_size_bytes:
             evicted_key, evicted_value = self._cache.popitem(last=False)
-            self.current_size_bytes -= evicted_value.nbytes
+            if self.compress:
+                evicted_compressed_data, _, _ = evicted_value
+                evicted_size = len(evicted_compressed_data)
+            else:
+                evicted_size = evicted_value.nbytes
+            self.current_size_bytes -= evicted_size
             logger.info(f"[CACHE {self.cache_name}] Evicted: {evicted_key}")
 
-        self._cache[key] = value
-        self.current_size_bytes += new_array_size
+        # Store the item
+        self._cache[key] = stored_value
+        self.current_size_bytes += new_item_size
         logger.info(
-            f"[CACHE {self.cache_name}] Stored: {key} | Cache size: {self.current_size_bytes / (1024**2):.2f} MB"
+            f"[CACHE {self.cache_name}] Stored: {key} | "
+            f"Cache size: {self.current_size_bytes / (1024**2):.2f} MB"
         )
 
     def __contains__(self, key: str) -> bool:

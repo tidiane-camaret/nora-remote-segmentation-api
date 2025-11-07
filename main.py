@@ -34,9 +34,11 @@ if not logging.getLogger().handlers:
 
 # --- Globals & App Initialization ---
 IMAGE_CACHE = ArrayCache(
-    max_size_bytes= 5 * 1024 * 1024 * 1024, cache_name="Image"
-)  # 1 GB
-ROI_CACHE = ArrayCache(max_size_bytes=512 * 1024 * 1024, cache_name="ROI")  # 512 MB
+    max_size_bytes=5 * 1024 * 1024 * 1024, cache_name="Image", compress=False
+)  # 5 GB
+ROI_CACHE = ArrayCache(
+    max_size_bytes=512 * 1024 * 1024, cache_name="ROI", compress=True
+)  # 512 MB (compressed storage)
 PROMPT_MANAGER = PromptManager()
 CURRENT_IMAGE_HASH = None  # Tracks the image hash currently loaded in PROMPT_MANAGER
 
