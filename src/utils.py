@@ -326,51 +326,90 @@ class ArrayCache:
 
 
 # ============================================================================
-# File Upload & Segmentation Utilities
+# Binary Compression & Array Serialization
 # ============================================================================
 
-def segmentation_binary(seg_in, compress=False):
-    """
-    Convert a (boolean) segmentation array into packed bits and optionally compress.
-    """
+def compress_binary(data: bytes) -> bytes:
+    """Compress binary data using gzip."""
     import gzip
-
-    seg_result = seg_in.astype(bool)  # Convert to bool type if not already
-    packed_segmentation = np.packbits(seg_result, axis=None)  # Pack into 1D byte array
-    packed_segmentation = packed_segmentation.tobytes()
-    if compress:
-        packed_segmentation = gzip.compress(packed_segmentation)
-    return packed_segmentation  # Convert to bytes for transmission
+    return gzip.compress(data)
 
 
-async def parse_file_upload(file, shape: str, dtype: str, compressed: str = None) -> np.ndarray:
+def decompress_binary(data: bytes, log_stats: bool = True) -> bytes:
     """
-    Helper to parse uploaded numpy array from binary file, with optional gzip decompression.
+    Decompress gzip binary data.
 
     Args:
-        file: UploadFile object from FastAPI
-        shape: JSON string representing the array shape
-        dtype: String representing the numpy dtype
-        compressed: Optional compression format (e.g., "gzip")
+        data: Compressed binary data
+        log_stats: If True, log compression statistics
 
     Returns:
-        numpy.ndarray: The parsed array
+        Decompressed binary data
     """
     import gzip
-    import json
 
     logger = logging.getLogger(__name__)
-    binary_data = await file.read()
+    original_size = len(data)
+    decompressed_data = gzip.decompress(data)
 
-    # Check if data is compressed and decompress if needed
-    if compressed == "gzip":
-        original_size = len(binary_data)
-        binary_data = gzip.decompress(binary_data)
-        decompressed_size = len(binary_data)
+    if log_stats:
+        decompressed_size = len(decompressed_data)
         compression_ratio = (1 - original_size / decompressed_size) * 100
         logger.info(
-            f"Decompressed ROI: {original_size} bytes -> {decompressed_size} bytes ({compression_ratio:.2f}% compression)"
+            f"Decompressed: {original_size} bytes -> {decompressed_size} bytes "
+            f"({compression_ratio:.2f}% compression)"
         )
 
-    shape_tuple = tuple(json.loads(shape))
-    return np.frombuffer(binary_data, dtype=np.dtype(dtype)).reshape(shape_tuple)
+    return decompressed_data
+
+
+def serialize_array(array: np.ndarray, compress: bool = False, pack_bits: bool = False) -> bytes:
+    """
+    Serialize a numpy array to bytes with optional compression.
+
+    Args:
+        array: Numpy array to serialize
+        compress: If True, compress the output with gzip
+        pack_bits: If True, pack boolean array using np.packbits (only for boolean arrays)
+
+    Returns:
+        Binary data (optionally compressed)
+    """
+    if pack_bits:
+        # Special handling for boolean arrays (segmentation masks)
+        array = array.astype(bool)
+        binary_data = np.packbits(array, axis=None).tobytes()
+    else:
+        # General array serialization
+        binary_data = array.tobytes()
+
+    if compress:
+        binary_data = compress_binary(binary_data)
+
+    return binary_data
+
+
+def deserialize_array(
+    binary_data: bytes,
+    shape: tuple,
+    dtype: str,
+    compressed: bool = False,
+    log_stats: bool = True
+) -> np.ndarray:
+    """
+    Deserialize binary data to a numpy array with optional decompression.
+
+    Args:
+        binary_data: Binary data to deserialize
+        shape: Shape of the output array
+        dtype: Data type of the array
+        compressed: If True, decompress data first
+        log_stats: If True, log decompression statistics
+
+    Returns:
+        Numpy array
+    """
+    if compressed:
+        binary_data = decompress_binary(binary_data, log_stats=log_stats)
+
+    return np.frombuffer(binary_data, dtype=np.dtype(dtype)).reshape(shape)

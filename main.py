@@ -13,11 +13,11 @@ from src.prompt_manager import PromptManager
 from src.utils import (
     ArrayCache,
     GPU_AVAILABLE,
+    deserialize_array,
     get_job_cgroup_memory_usage,
     get_slurm_memory_limit,
     log_memory_usage,
-    parse_file_upload,
-    segmentation_binary,
+    serialize_array,
     setup_logging,
 )
 
@@ -176,7 +176,9 @@ async def upload_image(
             )
     else:
         logger.info("Loading image from uploaded file data")
-        img_array = await parse_file_upload(file, shape, dtype)
+        binary_data = await file.read()
+        shape_tuple = tuple(json.loads(shape))
+        img_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=False, log_stats=False)
 
     size_mb = img_array.nbytes / (1024**2)
     logger.info(
@@ -225,7 +227,10 @@ async def upload_roi(
             status_code=400, detail="ROI not in cache and no file provided"
         )
 
-    roi_array = await parse_file_upload(file, shape, dtype, compressed)
+    binary_data = await file.read()
+    shape_tuple = tuple(json.loads(shape))
+    is_compressed = compressed == "gzip"
+    roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
     size_mb = roi_array.nbytes / (1024**2)
     logger.info(
         f"ROI details - shape: {roi_array.shape}, dtype: {roi_array.dtype}, size: {size_mb:.2f} MB, min: {roi_array.min()}, max: {roi_array.max()}"
@@ -271,7 +276,10 @@ async def add_roi_interaction(
                 status_code=400, detail="ROI not in cache and no file provided"
             )
 
-        roi_array = await parse_file_upload(file, shape, dtype, compressed)
+        binary_data = await file.read()
+        shape_tuple = tuple(json.loads(shape))
+        is_compressed = compressed == "gzip"
+        roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
         logger.info(
             f"Uploaded ROI details - shape: {roi_array.shape}, dtype: {roi_array.dtype}, min: {roi_array.min()}, max: {roi_array.max()}"
         )
@@ -283,7 +291,7 @@ async def add_roi_interaction(
     logger.info(f"seg_result counts: {np.unique(seg_result, return_counts=True)}")
     logger.info(f"seg_result shape: {seg_result.shape}, dtype: {seg_result.dtype}")
 
-    compressed_bin = segmentation_binary(seg_result, compress=True)
+    compressed_bin = serialize_array(seg_result, compress=True, pack_bits=True)
 
     log_memory_usage("AFTER")
     logger.info("=== ADD ROI INTERACTION SUCCESS ===")
@@ -338,7 +346,10 @@ async def add_bbox_interaction(
             raise HTTPException(
                 status_code=400, detail="ROI not in cache and no file provided"
             )
-        roi_array = await parse_file_upload(file, shape, dtype, compressed)
+        binary_data = await file.read()
+        shape_tuple = tuple(json.loads(shape))
+        is_compressed = compressed == "gzip"
+        roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
         # Cache the ROI
         ROI_CACHE.set(roi_hash, roi_array)
 
@@ -354,7 +365,7 @@ async def add_bbox_interaction(
         bbox_params.outer_point_two,
         include_interaction=bbox_params.positive_interaction,
     )
-    compressed_bin = segmentation_binary(seg_result, compress=True)
+    compressed_bin = serialize_array(seg_result, compress=True, pack_bits=True)
 
     log_memory_usage("AFTER")
     logger.info("=== ADD BBOX INTERACTION SUCCESS ===")
@@ -413,7 +424,10 @@ async def add_scribble_interaction(
             raise HTTPException(
                 status_code=400, detail="ROI not in cache and no file provided"
             )
-        roi_array = await parse_file_upload(file, shape, dtype, compressed)
+        binary_data = await file.read()
+        shape_tuple = tuple(json.loads(shape))
+        is_compressed = compressed == "gzip"
+        roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
         mean_roi_slice = np.mean(roi_array, axis=0)
         plt.imsave("mean_roi_slice.png", mean_roi_slice)
         # Cache the ROI
@@ -435,7 +449,7 @@ async def add_scribble_interaction(
     seg_result = pm.add_scribble_interaction(
         scribbles_mask, include_interaction=scribble_params.positive_interaction
     )
-    compressed_bin = segmentation_binary(seg_result, compress=True)
+    compressed_bin = serialize_array(seg_result, compress=True, pack_bits=True)
 
     log_memory_usage("AFTER")
     logger.info("=== ADD SCRIBBLE INTERACTION SUCCESS ===")
@@ -493,7 +507,10 @@ async def add_point_interaction(
             raise HTTPException(
                 status_code=400, detail="ROI not in cache and no file provided"
             )
-        roi_array = await parse_file_upload(file, shape, dtype, compressed)
+        binary_data = await file.read()
+        shape_tuple = tuple(json.loads(shape))
+        is_compressed = compressed == "gzip"
+        roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
         # Cache the ROI
         ROI_CACHE.set(roi_hash, roi_array)
 
@@ -506,7 +523,7 @@ async def add_point_interaction(
         point_params.point_coords,
         include_interaction=point_params.positive_interaction,
     )
-    compressed_bin = segmentation_binary(seg_result, compress=True)
+    compressed_bin = serialize_array(seg_result, compress=True, pack_bits=True)
 
     log_memory_usage("AFTER")
     logger.info("=== ADD POINT INTERACTION SUCCESS ===")

@@ -2,13 +2,7 @@ import os
 
 import numpy as np
 import torch
-from src.utils import (
-    REPO_ID,
-    MODEL_NAME,
-    DOWNLOAD_DIR,
-    download_model_weights,
-    segmentation_binary,
-)
+from src.utils import REPO_ID, MODEL_NAME, DOWNLOAD_DIR, download_model_weights
 
 
 class PromptManager:
