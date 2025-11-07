@@ -1,144 +1,30 @@
 import argparse
-import gzip
 import json
 import logging
-from collections import OrderedDict
-from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import psutil
 import uvicorn
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from src.prompt_manager import PromptManager, segmentation_binary
+from src.prompt_manager import PromptManager
+from src.utils import (
+    ArrayCache,
+    GPU_AVAILABLE,
+    get_job_cgroup_memory_usage,
+    get_slurm_memory_limit,
+    log_memory_usage,
+    parse_file_upload,
+    segmentation_binary,
+    setup_logging,
+)
 
-try:
-    import pynvml
-
-    pynvml.nvmlInit()
-    GPU_AVAILABLE = True
-except:
-    GPU_AVAILABLE = False
-
-
-def setup_logging(log_to_file: bool = False, log_level: str = "INFO"):
-    """
-    Configure logging for the application.
-
-    Args:
-        log_to_file: If True, logs will be written to a file. If False, only console output (default).
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-    """
-    handlers = []
-
-    # Always add console handler
-    handlers.append(logging.StreamHandler())
-
-    # Optionally add file handler
-    if log_to_file:
-        log_dir = Path("logs")
-        log_dir.mkdir(exist_ok=True)
-        log_filename = (
-            log_dir / f"segmentation_api_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        )
-        handlers.append(logging.FileHandler(log_filename, encoding="utf-8"))
-
-    # Configure logging
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper()),
-        format="%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=handlers,
-        force=True,  # Override any existing configuration
-    )
-
-    logger = logging.getLogger(__name__)
-    if log_to_file:
-        logger.info(f"Logging initialized. Log file: {log_filename}")
-    else:
-        logger.info("Logging initialized. Console only (file logging disabled)")
-
-    if not GPU_AVAILABLE:
-        logger.warning("GPU monitoring not available - pynvml failed to initialize")
-
-    return logger
-
-
-# Initialize logger variable (will be properly configured in main())
+# Initialize logging at module level (will be reconfigured in main() if needed)
+# This ensures logging works when uvicorn imports the module
+setup_logging(log_to_file=False, log_level="INFO")
 logger = logging.getLogger(__name__)
-
-
-def log_memory_usage(context: str = ""):
-    """Log current RAM and VRAM usage."""
-    # RAM usage
-    ram = psutil.virtual_memory()
-    ram_used_gb = ram.used / (1024**3)
-    ram_percent = ram.percent
-
-    log_msg = f"[MEMORY {context}] RAM: {ram_used_gb:.2f} GB ({ram_percent:.1f}%)"
-
-    # VRAM usage (if GPU available)
-    if GPU_AVAILABLE:
-        try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)  # GPU 0
-            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            vram_used_gb = info.used / (1024**3)
-            vram_total_gb = info.total / (1024**3)
-            vram_percent = (info.used / info.total) * 100
-            log_msg += f" | VRAM: {vram_used_gb:.2f}/{vram_total_gb:.2f} GB ({vram_percent:.1f}%)"
-        except Exception as e:
-            log_msg += f" | VRAM: Error - {str(e)}"
-    else:
-        log_msg += " | VRAM: N/A"
-
-    logger.info(log_msg)
-
-
-# --- Cache Management ---
-class ArrayCache:
-    """Generic cache for numpy arrays (images, ROIs, etc.)"""
-
-    def __init__(self, max_size_bytes: int, cache_name: str = "Array"):
-        self._cache = OrderedDict()
-        self.max_size_bytes = max_size_bytes
-        self.current_size_bytes = 0
-        self.cache_name = cache_name
-
-    def get(self, key: str) -> np.ndarray | None:
-        if key in self._cache:
-            # Move to end to mark as recently used
-            self._cache.move_to_end(key)
-            return self._cache[key]
-        return None
-
-    def set(self, key: str, value: np.ndarray):
-        new_array_size = value.nbytes
-        if new_array_size > self.max_size_bytes:
-            raise ValueError(
-                f"Array size {new_array_size} exceeds max cache size {self.max_size_bytes}"
-            )
-
-        if key in self._cache:
-            old_size = self._cache[key].nbytes
-            self.current_size_bytes -= old_size
-
-        while self.current_size_bytes + new_array_size > self.max_size_bytes:
-            evicted_key, evicted_value = self._cache.popitem(last=False)
-            self.current_size_bytes -= evicted_value.nbytes
-            logger.info(f"[CACHE {self.cache_name}] Evicted: {evicted_key}")
-
-        self._cache[key] = value
-        self.current_size_bytes += new_array_size
-        logger.info(
-            f"[CACHE {self.cache_name}] Stored: {key} | Cache size: {self.current_size_bytes / (1024**2):.2f} MB"
-        )
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._cache
-
 
 # --- Globals & App Initialization ---
 IMAGE_CACHE = ArrayCache(
@@ -177,27 +63,6 @@ async def ensure_active_image(image_hash: str):
         PROMPT_MANAGER.set_image(image_data)
         CURRENT_IMAGE_HASH = image_hash
     return PROMPT_MANAGER
-
-
-# --- Helper Functions ---
-async def parse_file_upload(
-    file: UploadFile, shape: str, dtype: str, compressed: str = None
-) -> np.ndarray:
-    """Helper to parse uploaded numpy array from binary file, with optional gzip decompression."""
-    binary_data = await file.read()
-
-    # Check if data is compressed and decompress if needed
-    if compressed == "gzip":
-        original_size = len(binary_data)
-        binary_data = gzip.decompress(binary_data)
-        decompressed_size = len(binary_data)
-        compression_ratio = (1 - original_size / decompressed_size) * 100
-        print(
-            f"Decompressed ROI: {original_size} bytes -> {decompressed_size} bytes ({compression_ratio:.2f}% compression)"
-        )
-
-    shape_tuple = tuple(json.loads(shape))
-    return np.frombuffer(binary_data, dtype=np.dtype(dtype)).reshape(shape_tuple)
 
 
 @app.get("/")
@@ -421,7 +286,7 @@ async def add_roi_interaction(
     compressed_bin = segmentation_binary(seg_result, compress=True)
 
     log_memory_usage("AFTER")
-    logger.info(f"=== ADD ROI INTERACTION SUCCESS ===")
+    logger.info("=== ADD ROI INTERACTION SUCCESS ===")
 
     return Response(
         content=compressed_bin,
@@ -697,6 +562,20 @@ def main():
         f"ROI cache max size: {ROI_CACHE.max_size_bytes / (1024**3):.2f} GB"
     )
     app_logger.info(f"GPU available: {GPU_AVAILABLE}")
+
+    # Log memory configuration
+    slurm_limit = get_slurm_memory_limit()
+    if slurm_limit:
+        app_logger.info(f"Running in Slurm job with {slurm_limit / (1024**3):.2f} GB memory allocation")
+
+        # Debug: Show cgroup detection
+        cgroup_usage = get_job_cgroup_memory_usage()
+        if cgroup_usage:
+            app_logger.info(f"Cgroup memory tracking enabled (current: {cgroup_usage / (1024**3):.2f} GB)")
+        else:
+            app_logger.warning("Cgroup memory tracking not available - will use process memory only")
+    else:
+        app_logger.info("Not running in Slurm job - using system memory")
 
     uvicorn.run(
         "main:app",

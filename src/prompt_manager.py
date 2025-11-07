@@ -1,21 +1,14 @@
-import gzip
 import os
 
 import numpy as np
 import torch
-from src.utils import REPO_ID, MODEL_NAME, DOWNLOAD_DIR, download_model_weights
-
-
-def segmentation_binary(seg_in, compress=False):
-    """
-    Convert a (boolean) segmentation array into packed bits and optionally compress.
-    """
-    seg_result = seg_in.astype(bool)  # Convert to bool type if not already
-    packed_segmentation = np.packbits(seg_result, axis=None)  # Pack into 1D byte array
-    packed_segmentation = packed_segmentation.tobytes()
-    if compress:
-        packed_segmentation = gzip.compress(packed_segmentation)
-    return packed_segmentation  # Convert to bytes for transmission
+from src.utils import (
+    REPO_ID,
+    MODEL_NAME,
+    DOWNLOAD_DIR,
+    download_model_weights,
+    segmentation_binary,
+)
 
 
 class PromptManager:
