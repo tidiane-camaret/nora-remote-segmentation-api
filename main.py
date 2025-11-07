@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -21,14 +22,19 @@ from src.utils import (
     setup_logging,
 )
 
-# Initialize logging at module level (will be reconfigured in main() if needed)
-# This ensures logging works when uvicorn imports the module
-setup_logging(log_to_file=False, log_level="INFO")
+# Get logger (will be configured in main() or via environment variables)
 logger = logging.getLogger(__name__)
+
+# Configure logging at module import if not already configured
+# This handles the case where uvicorn worker imports the module
+if not logging.getLogger().handlers:
+    log_to_file = os.environ.get("SEGMENTATION_API_LOG_FILE", "false").lower() == "true"
+    log_level = os.environ.get("SEGMENTATION_API_LOG_LEVEL", "INFO")
+    setup_logging(log_to_file=log_to_file, log_level=log_level)
 
 # --- Globals & App Initialization ---
 IMAGE_CACHE = ArrayCache(
-    max_size_bytes=1 * 1024 * 1024 * 1024, cache_name="Image"
+    max_size_bytes= 5 * 1024 * 1024 * 1024, cache_name="Image"
 )  # 1 GB
 ROI_CACHE = ArrayCache(max_size_bytes=512 * 1024 * 1024, cache_name="ROI")  # 512 MB
 PROMPT_MANAGER = PromptManager()
@@ -563,6 +569,11 @@ def main():
         help="Set the logging level (default: INFO)",
     )
     args = parser.parse_args()
+
+    # Set environment variables for logging configuration
+    # This ensures uvicorn worker processes inherit the logging settings
+    os.environ["SEGMENTATION_API_LOG_FILE"] = "true" if args.log_file else "false"
+    os.environ["SEGMENTATION_API_LOG_LEVEL"] = args.log_level
 
     # Configure logging with CLI arguments
     setup_logging(log_to_file=args.log_file, log_level=args.log_level)
