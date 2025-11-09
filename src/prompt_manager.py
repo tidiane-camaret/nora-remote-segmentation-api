@@ -15,6 +15,10 @@ class PromptManager:
         self.img = None
         self.target_tensor = None
 
+        # Track the last output to detect if client is sending back our result
+        self.last_output_hash = None
+        self.current_image_hash = None
+
         self.session = self.make_session()
 
     def make_session(self):
@@ -96,15 +100,18 @@ class PromptManager:
         if run_prediction:
             return self.target_tensor.clone().cpu().detach().numpy()
 
-    def add_point_interaction(self, point_coordinates, include_interaction):
+    def add_point_interaction(self, point_coordinates, include_interaction, run_prediction=True):
         """
         Process a point-based interaction (positive or negative).
         """
         self.session.add_point_interaction(
-            point_coordinates, include_interaction=include_interaction
+            point_coordinates, include_interaction=include_interaction, run_prediction=run_prediction
         )
 
-        return self.target_tensor.clone().cpu().detach().numpy()
+        if run_prediction:
+            return self.target_tensor.clone().cpu().detach().numpy()
+        else:
+            return None
 
     def add_bbox_interaction(
         self, outer_point_one, outer_point_two, include_interaction

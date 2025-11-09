@@ -41,6 +41,7 @@ ROI_CACHE = ArrayCache(
 )  # 512 MB (compressed storage)
 PROMPT_MANAGER = PromptManager()
 CURRENT_IMAGE_HASH = None  # Tracks the image hash currently loaded in PROMPT_MANAGER
+CURRENT_ROI_UUID = None  # Tracks the ROI UUID currently active in PROMPT_MANAGER
 
 app = FastAPI()
 
@@ -71,6 +72,39 @@ async def ensure_active_image(image_hash: str):
         PROMPT_MANAGER.set_image(image_data)
         CURRENT_IMAGE_HASH = image_hash
     return PROMPT_MANAGER
+
+
+def check_and_reset_interactions(roi_uuid: str, roi_has_changed: bool):
+    """
+    Checks if interactions should be reset based on ROI UUID change or roi_has_changed flag.
+    Resets interactions and updates CURRENT_ROI_UUID if necessary.
+
+    Args:
+        roi_uuid: The UUID of the current ROI
+        roi_has_changed: Whether the ROI has changed since last interaction
+
+    Returns:
+        bool: True if interactions were reset, False otherwise
+    """
+    global CURRENT_ROI_UUID
+
+    should_reset = False
+    reset_reason = None
+
+    if CURRENT_ROI_UUID != roi_uuid:
+        should_reset = True
+        reset_reason = f"ROI UUID changed from {CURRENT_ROI_UUID} to {roi_uuid}"
+    elif roi_has_changed:
+        should_reset = True
+        reset_reason = "ROI has changed (roi_has_changed=True)"
+
+    if should_reset:
+        logger.info(f"Resetting interactions: {reset_reason}")
+        PROMPT_MANAGER.session.reset_interactions()
+        CURRENT_ROI_UUID = roi_uuid
+        return True
+
+    return False
 
 
 @app.get("/")
@@ -136,6 +170,62 @@ async def set_active_image(
 ):
     """Sets the active image for the global prompt manager from the cache."""
     return {"status": "ok", "message": f"Active image set to {image_hash}"}
+
+
+@app.post("/reset_interactions")
+async def reset_interactions(roi_uuid: str = Form(...)):
+    """
+    Resets all interactions if the provided ROI UUID matches the current session UUID.
+    This allows users to manually clear accumulated interactions without changing the ROI.
+    """
+    global CURRENT_ROI_UUID
+
+    logger.info(f"=== RESET INTERACTIONS REQUEST === uuid: {roi_uuid}")
+
+    if CURRENT_ROI_UUID is None:
+        logger.warning("No active ROI session. Nothing to reset.")
+        return {
+            "status": "warning",
+            "message": "No active ROI session",
+            "reset": False
+        }
+
+    if CURRENT_ROI_UUID != roi_uuid:
+        logger.warning(
+            f"UUID mismatch: requested={roi_uuid}, current={CURRENT_ROI_UUID}. Not resetting."
+        )
+        return {
+            "status": "warning",
+            "message": f"UUID mismatch. Current session UUID: {CURRENT_ROI_UUID}",
+            "reset": False
+        }
+
+    # UUIDs match - reset interactions
+    logger.info(f"Resetting interactions for ROI UUID: {roi_uuid}")
+    PROMPT_MANAGER.session.reset_interactions()
+
+    return {
+        "status": "ok",
+        "message": f"Interactions reset for ROI UUID: {roi_uuid}",
+        "reset": True
+    }
+
+
+@app.post("/submit_bug_report")
+async def submit_bug_report(roi_uuid: str = Form(...), report_text: str = Form(...)):
+    """
+    Receives and logs bug reports from users.
+    The report includes the ROI UUID and a text description of the issue.
+    """
+    logger.info(f"=== BUG REPORT RECEIVED ===")
+    logger.info(f"ROI UUID: {roi_uuid}")
+    logger.info(f"Report: {report_text}")
+    logger.info("=" * 50)
+
+    return {
+        "status": "ok",
+        "message": "Bug report received. Thank you for your feedback!"
+    }
 
 
 @app.post("/upload_image")
@@ -213,6 +303,7 @@ async def upload_roi(
     shape: str = Form(...),
     dtype: str = Form(...),
     roi_hash: str = Form(...),
+    roi_uuid: str = Form(...),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
@@ -220,7 +311,7 @@ async def upload_roi(
     Uploads and caches an ROI without running segmentation.
     Used to pre-cache ROI data for subsequent interaction requests.
     """
-    logger.info(f"=== UPLOAD ROI START === hash: {roi_hash}")
+    logger.info(f"=== UPLOAD ROI START === hash: {roi_hash}, uuid: {roi_uuid}")
     log_memory_usage("BEFORE")
 
     # Check if ROI is already cached
@@ -259,6 +350,8 @@ async def add_roi_interaction(
     dtype: str = Form(...),
     image_hash: str = Form(...),
     roi_hash: str = Form(...),
+    roi_uuid: str = Form(...),
+    roi_has_changed: str = Form(...),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
@@ -267,11 +360,15 @@ async def add_roi_interaction(
     Similar to bbox/scribble interactions but uses the ROI as the only prompt.
     """
     logger.info(
-        f"=== ADD ROI INTERACTION START === image: {image_hash}, roi: {roi_hash}"
+        f"=== ADD ROI INTERACTION START === image: {image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}"
     )
     log_memory_usage("BEFORE")
 
     pm = await ensure_active_image(image_hash)
+
+    # Check if interactions should be reset
+    roi_has_changed_bool = roi_has_changed.lower() == "true"
+    interactions_were_reset = check_and_reset_interactions(roi_uuid, roi_has_changed_bool)
 
     # Check if ROI is already cached
     cached_roi = ROI_CACHE.get(roi_hash)
@@ -295,6 +392,7 @@ async def add_roi_interaction(
         ROI_CACHE.set(roi_hash, roi_array)
 
     # Set the roi in the prompt manager and run prediction
+    # Note: set_segment is always called for roi_interaction endpoint since the ROI itself is the prompt
     seg_result = pm.set_segment(roi_array, run_prediction=True)
     logger.info(f"seg_result counts: {np.unique(seg_result, return_counts=True)}")
     logger.info(f"seg_result shape: {seg_result.shape}, dtype: {seg_result.dtype}")
@@ -326,6 +424,8 @@ async def add_bbox_interaction(
     dtype: str = Form(...),
     params: str = Form(...),
     roi_hash: str = Form(...),
+    roi_uuid: str = Form(...),
+    roi_has_changed: str = Form(...),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
@@ -336,36 +436,42 @@ async def add_bbox_interaction(
     # Parse interaction parameters from JSON string
     bbox_params = BBoxParams(**json.loads(params))
     logger.info(
-        f"=== ADD BBOX INTERACTION START === image: {bbox_params.image_hash}, roi: {roi_hash}"
+        f"=== ADD BBOX INTERACTION START === image: {bbox_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}"
     )
     log_memory_usage("BEFORE")
 
     # Ensure the correct image is active
     pm = await ensure_active_image(bbox_params.image_hash)
 
-    # --- Process the uploaded ROI mask ---
-    # Check if ROI is already cached
-    cached_roi = ROI_CACHE.get(roi_hash)
-    if cached_roi is not None:
-        logger.info(f"ROI {roi_hash} found in cache for bbox interaction.")
-        roi_array = cached_roi
-    else:
-        if file is None:
-            raise HTTPException(
-                status_code=400, detail="ROI not in cache and no file provided"
-            )
-        binary_data = await file.read()
-        shape_tuple = tuple(json.loads(shape))
-        is_compressed = compressed == "gzip"
-        roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
-        # Cache the ROI
-        ROI_CACHE.set(roi_hash, roi_array)
+    # Check if interactions should be reset
+    roi_has_changed_bool = roi_has_changed.lower() == "true"
+    interactions_were_reset = check_and_reset_interactions(roi_uuid, roi_has_changed_bool)
 
-    # Set the base ROI mask in the prompt manager without running prediction yet
-    pm.set_segment(
-        roi_array, run_prediction=False
-    )  # TODO : if incoming ROI is the exact same as the one in session memory, do not set again
-    logger.info("Base ROI mask set for bbox interaction.")
+    # --- Process the uploaded ROI mask ---
+    # Only load and set ROI if interactions were reset (otherwise we preserve existing interactions)
+    if interactions_were_reset:
+        # Check if ROI is already cached
+        cached_roi = ROI_CACHE.get(roi_hash)
+        if cached_roi is not None:
+            logger.info(f"ROI {roi_hash} found in cache for bbox interaction.")
+            roi_array = cached_roi
+        else:
+            if file is None:
+                raise HTTPException(
+                    status_code=400, detail="ROI not in cache and no file provided"
+                )
+            binary_data = await file.read()
+            shape_tuple = tuple(json.loads(shape))
+            is_compressed = compressed == "gzip"
+            roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
+            # Cache the ROI
+            ROI_CACHE.set(roi_hash, roi_array)
+
+        # Set the base ROI mask in the prompt manager without running prediction yet
+        pm.set_segment(roi_array, run_prediction=False)
+        logger.info("Base ROI mask set for bbox interaction (interactions were reset).")
+    else:
+        logger.info("Skipping set_segment for bbox interaction (preserving existing interactions).")
 
     # Call the bounding box interaction method
     seg_result = pm.add_bbox_interaction(
@@ -401,6 +507,8 @@ async def add_scribble_interaction(
     dtype: str = Form(...),
     params: str = Form(...),
     roi_hash: str = Form(...),
+    roi_uuid: str = Form(...),
+    roi_has_changed: str = Form(...),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
@@ -411,7 +519,7 @@ async def add_scribble_interaction(
     # Parse interaction parameters from JSON string
     scribble_params = ScribbleParams(**json.loads(params))
     logger.info(
-        f"=== ADD SCRIBBLE INTERACTION START === image: {scribble_params.image_hash}, roi: {roi_hash}"
+        f"=== ADD SCRIBBLE INTERACTION START === image: {scribble_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}"
     )
     logger.info(
         f"Scribble details: {len(scribble_params.scribble_coords)} points, label: {scribble_params.scribble_labels[0]}"
@@ -421,29 +529,37 @@ async def add_scribble_interaction(
     # Ensure the correct image is active
     pm = await ensure_active_image(scribble_params.image_hash)
 
-    # --- Process the uploaded ROI mask ---
-    # Check if ROI is already cached
-    cached_roi = ROI_CACHE.get(roi_hash)
-    if cached_roi is not None:
-        logger.info(f"ROI {roi_hash} found in cache for scribble interaction.")
-        roi_array = cached_roi
-    else:
-        if file is None:
-            raise HTTPException(
-                status_code=400, detail="ROI not in cache and no file provided"
-            )
-        binary_data = await file.read()
-        shape_tuple = tuple(json.loads(shape))
-        is_compressed = compressed == "gzip"
-        roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
-        mean_roi_slice = np.mean(roi_array, axis=0)
-        plt.imsave("mean_roi_slice.png", mean_roi_slice)
-        # Cache the ROI
-        ROI_CACHE.set(roi_hash, roi_array)
+    # Check if interactions should be reset
+    roi_has_changed_bool = roi_has_changed.lower() == "true"
+    interactions_were_reset = check_and_reset_interactions(roi_uuid, roi_has_changed_bool)
 
-    # Set the base ROI mask in the prompt manager without running prediction yet
-    pm.set_segment(roi_array, run_prediction=False)
-    logger.info("Base ROI mask set for scribble interaction.")
+    # --- Process the uploaded ROI mask ---
+    # Only load and set ROI if interactions were reset (otherwise we preserve existing interactions)
+    if interactions_were_reset:
+        # Check if ROI is already cached
+        cached_roi = ROI_CACHE.get(roi_hash)
+        if cached_roi is not None:
+            logger.info(f"ROI {roi_hash} found in cache for scribble interaction.")
+            roi_array = cached_roi
+        else:
+            if file is None:
+                raise HTTPException(
+                    status_code=400, detail="ROI not in cache and no file provided"
+                )
+            binary_data = await file.read()
+            shape_tuple = tuple(json.loads(shape))
+            is_compressed = compressed == "gzip"
+            roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
+            mean_roi_slice = np.mean(roi_array, axis=0)
+            plt.imsave("mean_roi_slice.png", mean_roi_slice)
+            # Cache the ROI
+            ROI_CACHE.set(roi_hash, roi_array)
+
+        # Set the base ROI mask in the prompt manager without running prediction yet
+        pm.set_segment(roi_array, run_prediction=False)
+        logger.info("Base ROI mask set for scribble interaction (interactions were reset).")
+    else:
+        logger.info("Skipping set_segment for scribble interaction (preserving existing interactions).")
 
     # Create a mask from scribble coordinates
     scribbles_mask = pm.create_mask_from_scribbles(
@@ -474,8 +590,8 @@ async def add_scribble_interaction(
 #
 class PointParams(BaseModel):
     image_hash: str
-    point_coords: list[int]
-    positive_interaction: bool
+    point_coords: list[list[int]]  # List of [z, y, x] coordinates
+    point_labels: list[int]  # List of labels (1 for positive, 0 for negative)
 
 
 @app.post("/add_point_interaction")
@@ -484,53 +600,84 @@ async def add_point_interaction(
     dtype: str = Form(...),
     params: str = Form(...),
     roi_hash: str = Form(...),
+    roi_uuid: str = Form(...),
+    roi_has_changed: str = Form(...),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
     """
-    Receives point coordinates, positive/negative interaction, and a base ROI mask.
-    Updates model & returns a refined mask.
+    Receives multiple point coordinates with their labels (positive/negative), and a base ROI mask.
+    Adds all points to the model, running prediction only on the last point for efficiency.
+    Returns a refined mask.
     """
     # Parse interaction parameters from JSON string
     point_params = PointParams(**json.loads(params))
     logger.info(
-        f"=== ADD POINT INTERACTION START === image: {point_params.image_hash}, roi: {roi_hash}"
+        f"=== ADD POINT INTERACTION START === image: {point_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}"
     )
     logger.info(
-        f"Point coords: {point_params.point_coords}, positive: {point_params.positive_interaction}"
+        f"Number of points: {len(point_params.point_coords)}, coords: {point_params.point_coords}, labels: {point_params.point_labels}"
     )
     log_memory_usage("BEFORE")
+
+    # Validate that coords and labels have the same length
+    if len(point_params.point_coords) != len(point_params.point_labels):
+        raise HTTPException(
+            status_code=400,
+            detail=f"point_coords and point_labels must have the same length. Got {len(point_params.point_coords)} coords and {len(point_params.point_labels)} labels"
+        )
 
     # Ensure the correct image is active
     pm = await ensure_active_image(point_params.image_hash)
 
+    # Check if interactions should be reset
+    roi_has_changed_bool = roi_has_changed.lower() == "true"
+    interactions_were_reset = check_and_reset_interactions(roi_uuid, roi_has_changed_bool)
+
     # --- Process the uploaded ROI mask ---
-    # Check if ROI is already cached
-    cached_roi = ROI_CACHE.get(roi_hash)
-    if cached_roi is not None:
-        logger.info(f"ROI {roi_hash} found in cache for point interaction.")
-        roi_array = cached_roi
+    # Only load and set ROI if interactions were reset (otherwise we preserve existing interactions)
+    if interactions_were_reset:
+        # Check if ROI is already cached
+        cached_roi = ROI_CACHE.get(roi_hash)
+        if cached_roi is not None:
+            logger.info(f"ROI {roi_hash} found in cache for point interaction.")
+            roi_array = cached_roi
+        else:
+            if file is None:
+                raise HTTPException(
+                    status_code=400, detail="ROI not in cache and no file provided"
+                )
+            binary_data = await file.read()
+            shape_tuple = tuple(json.loads(shape))
+            is_compressed = compressed == "gzip"
+            roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
+            # Cache the ROI
+            ROI_CACHE.set(roi_hash, roi_array)
+
+        # Set the base ROI mask in the prompt manager without running prediction yet
+        pm.set_segment(roi_array, run_prediction=False)
+        logger.info("Base ROI mask set for point interaction (interactions were reset).")
     else:
-        if file is None:
-            raise HTTPException(
-                status_code=400, detail="ROI not in cache and no file provided"
-            )
-        binary_data = await file.read()
-        shape_tuple = tuple(json.loads(shape))
-        is_compressed = compressed == "gzip"
-        roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
-        # Cache the ROI
-        ROI_CACHE.set(roi_hash, roi_array)
+        logger.info("Skipping set_segment for point interaction (preserving existing interactions).")
 
-    # Set the base ROI mask in the prompt manager without running prediction yet
-    pm.set_segment(roi_array, run_prediction=False)
-    logger.info("Base ROI mask set for point interaction.")
+    # Add all points - run prediction only on the last one
+    seg_result = None
+    num_points = len(point_params.point_coords)
+    for i, (point_coord, point_label) in enumerate(zip(point_params.point_coords, point_params.point_labels)):
+        is_last_point = (i == num_points - 1)
+        include_interaction = (point_label == 1)  # 1 = positive, 0 = negative
 
-    # Call the point interaction method
-    seg_result = pm.add_point_interaction(
-        point_params.point_coords,
-        include_interaction=point_params.positive_interaction,
-    )
+        logger.info(f"Adding point {i+1}/{num_points}: {point_coord}, label: {point_label} (positive: {include_interaction}), run_prediction: {is_last_point}")
+
+        result = pm.add_point_interaction(
+            point_coord,
+            include_interaction=include_interaction,
+            run_prediction=is_last_point
+        )
+
+        if is_last_point:
+            seg_result = result
+
     compressed_bin = serialize_array(seg_result, compress=True, pack_bits=True)
 
     log_memory_usage("AFTER")

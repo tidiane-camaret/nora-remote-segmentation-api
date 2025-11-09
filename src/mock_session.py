@@ -41,11 +41,11 @@ class MockSession:
             value = 1 if include_interaction else 0
             self.target_buffer[z_min:z_max, y_min:y_max, x_min:x_max] = value
 
-    def add_point_interaction(self, point, include_interaction=True):
+    def add_point_interaction(self, point, include_interaction=True, run_prediction=True):
         self.interactions.append(("point", point, include_interaction))
         if self.target_buffer is not None:
             z, y, x = int(point[0]), int(point[1]), int(point[2])
-            
+
             # Create a small 3x3x3 cube around the point
             z_start, z_end = max(0, z - 1), min(self.target_buffer.shape[0], z + 2)
             y_start, y_end = max(0, y - 1), min(self.target_buffer.shape[1], y + 2)
@@ -53,6 +53,7 @@ class MockSession:
 
             value = 1 if include_interaction else 0
             self.target_buffer[z_start:z_end, y_start:y_end, x_start:x_end] = value
+        # Note: run_prediction parameter is ignored in mock session
 
     def add_lasso_interaction(self, mask, include_interaction=True):
         self.interactions.append(("lasso", mask.copy(), include_interaction))
