@@ -15,10 +15,6 @@ class PromptManager:
         self.img = None
         self.target_tensor = None
 
-        # Track the last output to detect if client is sending back our result
-        self.last_output_hash = None
-        self.current_image_hash = None
-
         self.session = self.make_session()
 
     def make_session(self):

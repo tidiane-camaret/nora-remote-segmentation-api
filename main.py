@@ -33,15 +33,46 @@ if not logging.getLogger().handlers:
     setup_logging(log_to_file=log_to_file, log_level=log_level)
 
 # --- Globals & App Initialization ---
-IMAGE_CACHE = ArrayCache(
-    max_size_bytes=5 * 1024 * 1024 * 1024, cache_name="Image", compress=False
-)  # 5 GB
-ROI_CACHE = ArrayCache(
-    max_size_bytes=512 * 1024 * 1024, cache_name="ROI", compress=True
-)  # 512 MB (compressed storage)
+# Caches will be initialized in main() or at module import based on environment
+IMAGE_CACHE = None
+ROI_CACHE = None
 PROMPT_MANAGER = PromptManager()
 CURRENT_IMAGE_HASH = None  # Tracks the image hash currently loaded in PROMPT_MANAGER
 CURRENT_ROI_UUID = None  # Tracks the ROI UUID currently active in PROMPT_MANAGER
+
+
+def init_caches(persist_dir: str | None = None):
+    """
+    Initialize image and ROI caches with optional persistence.
+
+    Args:
+        persist_dir: Directory for persistent cache storage. If None, caches are RAM-only.
+    """
+    global IMAGE_CACHE, ROI_CACHE
+
+    IMAGE_CACHE = ArrayCache(
+        max_size_bytes=5 * 1024 * 1024 * 1024,
+        cache_name="Image",
+        compress=False,
+        persist_dir=persist_dir,
+        max_disk_size_bytes=30 * 1024 * 1024 * 1024 if persist_dir else None  # 30 GB disk storage
+    )  # 5 GB RAM, 30 GB disk (if persistence enabled)
+
+    ROI_CACHE = ArrayCache(
+        max_size_bytes=512 * 1024 * 1024,
+        cache_name="ROI",
+        compress=True,
+        persist_dir=persist_dir,
+        max_disk_size_bytes=2 * 1024 * 1024 * 1024 if persist_dir else None  # 2 GB disk storage
+    )  # 512 MB RAM (compressed), 2 GB disk (if persistence enabled)
+
+
+# Initialize caches at module import if not already initialized
+# This handles the case where uvicorn worker imports the module
+if IMAGE_CACHE is None:
+    cache_dir_env = os.environ.get("SEGMENTATION_API_CACHE_DIR", "none")
+    cache_dir = None if cache_dir_env.lower() == "none" else cache_dir_env
+    init_caches(persist_dir=cache_dir)
 
 app = FastAPI()
 
@@ -717,12 +748,19 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Set the logging level (default: INFO)",
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default="none",
+        help="Directory for persistent cache storage. Use 'none' to disable persistence (default: none - RAM only)",
+    )
     args = parser.parse_args()
 
-    # Set environment variables for logging configuration
-    # This ensures uvicorn worker processes inherit the logging settings
+    # Set environment variables for configuration
+    # This ensures uvicorn worker processes inherit these settings
     os.environ["SEGMENTATION_API_LOG_FILE"] = "true" if args.log_file else "false"
     os.environ["SEGMENTATION_API_LOG_LEVEL"] = args.log_level
+    os.environ["SEGMENTATION_API_CACHE_DIR"] = args.cache_dir
 
     # Configure logging with CLI arguments
     setup_logging(log_to_file=args.log_file, log_level=args.log_level)
@@ -730,8 +768,16 @@ def main():
     # Get logger after setup
     app_logger = logging.getLogger(__name__)
 
+    # Initialize caches with optional persistence
+    cache_dir = None if args.cache_dir.lower() == "none" else args.cache_dir
+    init_caches(persist_dir=cache_dir)
+
     # Log startup configuration
     app_logger.info(f"Starting server on {args.host}:{args.port}")
+    if cache_dir:
+        app_logger.info(f"Cache persistence enabled: {cache_dir}")
+    else:
+        app_logger.info("Cache persistence disabled (RAM-only mode)")
     app_logger.info(
         f"Image cache max size: {IMAGE_CACHE.max_size_bytes / (1024**3):.2f} GB"
     )

@@ -13,7 +13,7 @@ try:
 
     pynvml.nvmlInit()
     GPU_AVAILABLE = True
-except:
+except Exception:
     GPU_AVAILABLE = False
 
 
@@ -283,16 +283,222 @@ def log_memory_usage(context: str = ""):
 # ============================================================================
 
 class ArrayCache:
-    """Generic cache for numpy arrays (images, ROIs, etc.)"""
+    """Generic cache for numpy arrays (images, ROIs, etc.) with disk persistence"""
 
-    def __init__(self, max_size_bytes: int, cache_name: str = "Array", compress: bool = False):
+    def __init__(self, max_size_bytes: int, cache_name: str = "Array", compress: bool = False, persist_dir: str | None = None, max_disk_size_bytes: int | None = None):
         self._cache = OrderedDict()
         self.max_size_bytes = max_size_bytes
         self.current_size_bytes = 0
         self.cache_name = cache_name
         self.compress = compress
+        self.persist_dir = Path(persist_dir) if persist_dir else None
+        # Disk cache can be larger than RAM cache
+        self.max_disk_size_bytes = max_disk_size_bytes if max_disk_size_bytes else max_size_bytes
+        self.current_disk_size_bytes = 0
+
+        # Create persistence directory if specified
+        if self.persist_dir:
+            self.persist_dir.mkdir(parents=True, exist_ok=True)
+            self._load_from_disk()
+
+    def _get_cache_file_path(self, key: str) -> Path:
+        """Get the file path for a cache key"""
+        # Sanitize key to make it filesystem-safe
+        safe_key = key.replace('/', '_').replace('\\', '_')
+        return self.persist_dir / f"{self.cache_name}_{safe_key}.npy"
+
+    def _load_from_disk(self):
+        """Load cached arrays from disk on initialization"""
+        logger = logging.getLogger(__name__)
+        if not self.persist_dir:
+            return
+
+        logger.info(f"[CACHE {self.cache_name}] Loading from disk: {self.persist_dir}")
+
+        # Find all cache files for this cache
+        pattern = f"{self.cache_name}_*.npy"
+        # Sort by modification time (most recent first) to prioritize recent items
+        cache_files = sorted(self.persist_dir.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+
+        loaded_count = 0
+        disk_total = 0
+        for cache_file in cache_files:
+            try:
+                # Extract key from filename
+                key = cache_file.stem.replace(f"{self.cache_name}_", "", 1)
+
+                # Get file size for disk tracking
+                file_size = cache_file.stat().st_size
+                disk_total += file_size
+
+                # Load the array metadata/data
+                if self.compress:
+                    # Load compressed data stored as npz file
+                    data = np.load(cache_file, allow_pickle=True)
+                    compressed_data = data['compressed_data'].tobytes()
+                    shape = tuple(data['shape'])
+                    dtype = str(data['dtype_str'])
+                    data.close()  # Close the npz file
+                    stored_value = (compressed_data, shape, dtype)
+                    item_size = len(stored_value[0])
+                else:
+                    # Load uncompressed array
+                    stored_value = np.load(cache_file, mmap_mode=None)
+                    item_size = stored_value.nbytes
+
+                # Load into RAM if there's space (most recent items first)
+                if self.current_size_bytes + item_size <= self.max_size_bytes:
+                    self._cache[key] = stored_value
+                    self.current_size_bytes += item_size
+                    loaded_count += 1
+                else:
+                    logger.debug(f"[CACHE {self.cache_name}] {key} on disk only (RAM full)")
+
+            except Exception as e:
+                logger.warning(f"[CACHE {self.cache_name}] Failed to load {cache_file}: {e}")
+
+        self.current_disk_size_bytes = disk_total
+        logger.info(
+            f"[CACHE {self.cache_name}] Loaded {loaded_count} items into RAM ({self.current_size_bytes / (1024**2):.2f} MB), "
+            f"{len(cache_files)} items on disk ({self.current_disk_size_bytes / (1024**2):.2f} MB)"
+        )
+
+    def _save_to_disk(self, key: str, stored_value):
+        """Save a cache entry to disk atomically, respecting disk size limit"""
+        if not self.persist_dir:
+            return
+
+        logger = logging.getLogger(__name__)
+
+        # Ensure directory exists
+        self.persist_dir.mkdir(parents=True, exist_ok=True)
+
+        cache_file = self._get_cache_file_path(key)
+
+        # Check if file already exists and track its size
+        old_file_size = 0
+        if cache_file.exists():
+            old_file_size = cache_file.stat().st_size
+
+        # Use a temp file with .tmp prefix to avoid .npy extension issues
+        temp_file = cache_file.with_name(f".tmp_{cache_file.name}")
+
+        try:
+            if self.compress:
+                # Save compressed data with metadata using npz format
+                # Remove .npy extension for npz
+                temp_file_npz = temp_file.with_suffix('')
+                compressed_data, shape, dtype = stored_value
+                np.savez(
+                    str(temp_file_npz),  # numpy will add .npz
+                    compressed_data=np.frombuffer(compressed_data, dtype=np.uint8),
+                    shape=np.array(shape),
+                    dtype_str=np.array(dtype)
+                )
+                # numpy adds .npz, so rename that to .npy
+                actual_npz = Path(str(temp_file_npz) + '.npz')
+                if actual_npz.exists():
+                    new_file_size = actual_npz.stat().st_size
+
+                    # Evict old files if needed to make space
+                    self._evict_disk_space_if_needed(new_file_size - old_file_size, exclude_key=key)
+
+                    actual_npz.replace(cache_file)
+                    # Update disk usage
+                    self.current_disk_size_bytes = self.current_disk_size_bytes - old_file_size + new_file_size
+            else:
+                # Save uncompressed array directly
+                # Remove .npy extension since numpy will add it
+                temp_file_no_ext = temp_file.with_suffix('')
+                np.save(str(temp_file_no_ext), stored_value)
+                # numpy adds .npy extension
+                actual_temp = Path(str(temp_file_no_ext) + '.npy')
+                if actual_temp.exists():
+                    new_file_size = actual_temp.stat().st_size
+
+                    # Evict old files if needed to make space
+                    self._evict_disk_space_if_needed(new_file_size - old_file_size, exclude_key=key)
+
+                    actual_temp.replace(cache_file)
+                    # Update disk usage
+                    self.current_disk_size_bytes = self.current_disk_size_bytes - old_file_size + new_file_size
+
+            logger.debug(f"[CACHE {self.cache_name}] Saved {key} to disk (disk: {self.current_disk_size_bytes / (1024**2):.2f} MB)")
+
+        except Exception as e:
+            logger.warning(f"[CACHE {self.cache_name}] Failed to save {key} to disk: {e}")
+            # Clean up any temp files
+            for pattern in ['.tmp_*', '.tmp_*.npy', '.tmp_*.npz']:
+                for temp in self.persist_dir.glob(pattern):
+                    try:
+                        temp.unlink()
+                    except Exception:
+                        pass
+
+    def _evict_disk_space_if_needed(self, additional_size: int, exclude_key: str | None = None):
+        """Evict oldest disk cache files if needed to make space for new item"""
+        if not self.persist_dir:
+            return
+
+        logger = logging.getLogger(__name__)
+
+        # Check if we need to evict
+        if self.current_disk_size_bytes + additional_size <= self.max_disk_size_bytes:
+            return
+
+        # Find all cache files sorted by modification time (oldest first)
+        pattern = f"{self.cache_name}_*.npy"
+        cache_files = sorted(self.persist_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
+
+        # Evict oldest files until we have enough space
+        for cache_file in cache_files:
+            if self.current_disk_size_bytes + additional_size <= self.max_disk_size_bytes:
+                break
+
+            # Extract key from filename
+            key = cache_file.stem.replace(f"{self.cache_name}_", "", 1)
+
+            # Don't evict the file we're currently saving
+            if key == exclude_key:
+                continue
+
+            try:
+                file_size = cache_file.stat().st_size
+                cache_file.unlink()
+                self.current_disk_size_bytes -= file_size
+                logger.info(f"[CACHE {self.cache_name}] Evicted from disk: {key} ({file_size / (1024**2):.2f} MB)")
+
+                # Also remove from RAM cache if present
+                if key in self._cache:
+                    if self.compress:
+                        compressed_data, _, _ = self._cache[key]
+                        ram_size = len(compressed_data)
+                    else:
+                        ram_size = self._cache[key].nbytes
+                    self.current_size_bytes -= ram_size
+                    del self._cache[key]
+
+            except Exception as e:
+                logger.warning(f"[CACHE {self.cache_name}] Failed to evict {key} from disk: {e}")
+
+    def _remove_from_disk(self, key: str):
+        """Remove a cache entry from disk and update disk usage tracking"""
+        if not self.persist_dir:
+            return
+
+        cache_file = self._get_cache_file_path(key)
+        logger = logging.getLogger(__name__)
+        try:
+            if cache_file.exists():
+                file_size = cache_file.stat().st_size
+                cache_file.unlink()
+                self.current_disk_size_bytes -= file_size
+                logger.debug(f"[CACHE {self.cache_name}] Removed {key} from disk")
+        except Exception as e:
+            logger.warning(f"[CACHE {self.cache_name}] Failed to remove {key} from disk: {e}")
 
     def get(self, key: str) -> np.ndarray | None:
+        # Check RAM cache first
         if key in self._cache:
             # Move to end to mark as recently used
             self._cache.move_to_end(key)
@@ -303,6 +509,68 @@ class ArrayCache:
                 return deserialize_array(compressed_data, shape, dtype, compressed=True, log_stats=False)
             else:
                 return self._cache[key]
+
+        # Not in RAM - check disk if persistence is enabled
+        if self.persist_dir:
+            cache_file = self._get_cache_file_path(key)
+            if cache_file.exists():
+                logger = logging.getLogger(__name__)
+                logger.debug(f"[CACHE {self.cache_name}] Loading {key} from disk")
+
+                try:
+                    # Load from disk
+                    if self.compress:
+                        data = np.load(cache_file, allow_pickle=True)
+                        compressed_data = data['compressed_data'].tobytes()
+                        shape = tuple(data['shape'])
+                        dtype = str(data['dtype_str'])
+                        data.close()
+                        stored_value = (compressed_data, shape, dtype)
+                        item_size = len(compressed_data)
+
+                        # Try to add to RAM cache if it fits
+                        if item_size <= self.max_size_bytes:
+                            # Evict items if needed
+                            while self.current_size_bytes + item_size > self.max_size_bytes:
+                                if not self._cache:
+                                    break
+                                evicted_key, evicted_value = self._cache.popitem(last=False)
+                                evicted_compressed_data, _, _ = evicted_value
+                                evicted_size = len(evicted_compressed_data)
+                                self.current_size_bytes -= evicted_size
+                                logger.debug(f"[CACHE {self.cache_name}] Evicted {evicted_key} to make room")
+
+                            self._cache[key] = stored_value
+                            self.current_size_bytes += item_size
+                            logger.debug(f"[CACHE {self.cache_name}] Loaded {key} into RAM")
+
+                        # Return decompressed array
+                        return deserialize_array(compressed_data, shape, dtype, compressed=True, log_stats=False)
+                    else:
+                        # Uncompressed array
+                        array = np.load(cache_file, mmap_mode=None)
+                        item_size = array.nbytes
+
+                        # Try to add to RAM cache if it fits
+                        if item_size <= self.max_size_bytes:
+                            # Evict items if needed
+                            while self.current_size_bytes + item_size > self.max_size_bytes:
+                                if not self._cache:
+                                    break
+                                evicted_key, evicted_value = self._cache.popitem(last=False)
+                                evicted_size = evicted_value.nbytes
+                                self.current_size_bytes -= evicted_size
+                                logger.debug(f"[CACHE {self.cache_name}] Evicted {evicted_key} to make room")
+
+                            self._cache[key] = array
+                            self.current_size_bytes += item_size
+                            logger.debug(f"[CACHE {self.cache_name}] Loaded {key} into RAM")
+
+                        return array
+
+                except Exception as e:
+                    logger.warning(f"[CACHE {self.cache_name}] Failed to load {key} from disk: {e}")
+
         return None
 
     def set(self, key: str, value: np.ndarray):
@@ -326,9 +594,11 @@ class ArrayCache:
             new_item_size = value.nbytes
             stored_value = value
 
-        if new_item_size > self.max_size_bytes:
+        # Check against disk size if persistence is enabled, otherwise check against RAM
+        size_limit = self.max_disk_size_bytes if self.persist_dir else self.max_size_bytes
+        if new_item_size > size_limit:
             raise ValueError(
-                f"Item size {new_item_size / (1024**2):.2f} MB exceeds max cache size {self.max_size_bytes / (1024**2):.2f} MB"
+                f"Item size {new_item_size / (1024**2):.2f} MB exceeds max cache size {size_limit / (1024**2):.2f} MB"
             )
 
         # Remove old item if key exists
@@ -340,8 +610,11 @@ class ArrayCache:
                 old_size = self._cache[key].nbytes
             self.current_size_bytes -= old_size
 
-        # Evict items if necessary
+        # Evict items from RAM if necessary
         while self.current_size_bytes + new_item_size > self.max_size_bytes:
+            if not self._cache:
+                # No items in RAM to evict
+                break
             evicted_key, evicted_value = self._cache.popitem(last=False)
             if self.compress:
                 evicted_compressed_data, _, _ = evicted_value
@@ -349,18 +622,35 @@ class ArrayCache:
             else:
                 evicted_size = evicted_value.nbytes
             self.current_size_bytes -= evicted_size
-            logger.info(f"[CACHE {self.cache_name}] Evicted: {evicted_key}")
+            logger.info(f"[CACHE {self.cache_name}] Evicted from RAM: {evicted_key}")
+            # Note: Don't remove from disk - it stays there for later retrieval
 
-        # Store the item
-        self._cache[key] = stored_value
-        self.current_size_bytes += new_item_size
-        logger.info(
-            f"[CACHE {self.cache_name}] Stored: {key} | "
-            f"Cache size: {self.current_size_bytes / (1024**2):.2f} MB"
-        )
+        # Store the item in memory only if it fits in RAM
+        if new_item_size <= self.max_size_bytes:
+            self._cache[key] = stored_value
+            self.current_size_bytes += new_item_size
+            logger.info(
+                f"[CACHE {self.cache_name}] Stored: {key} | "
+                f"RAM: {self.current_size_bytes / (1024**2):.2f} MB"
+            )
+        else:
+            logger.info(
+                f"[CACHE {self.cache_name}] Item {key} too large for RAM "
+                f"({new_item_size / (1024**2):.2f} MB), storing on disk only"
+            )
+
+        # Save to disk if persistence is enabled
+        self._save_to_disk(key, stored_value)
 
     def __contains__(self, key: str) -> bool:
-        return key in self._cache
+        # Check RAM cache first
+        if key in self._cache:
+            return True
+        # Check disk if persistence is enabled
+        if self.persist_dir:
+            cache_file = self._get_cache_file_path(key)
+            return cache_file.exists()
+        return False
 
 
 # ============================================================================

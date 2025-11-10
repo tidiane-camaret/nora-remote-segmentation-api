@@ -14,5 +14,7 @@ wheels/
 
 certs/
 logs/
+data/
 results/performance_statistics.csv
 *.png
+.claude/
