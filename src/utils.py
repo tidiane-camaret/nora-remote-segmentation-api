@@ -57,25 +57,29 @@ if __name__ == "__main__":
 # Logging Setup
 # ============================================================================
 
-def setup_logging(log_to_file: bool = False, log_level: str = "INFO"):
+def setup_logging(log_dir: str | None = None, log_level: str = "INFO"):
     """
     Configure logging for the application.
 
     Args:
-        log_to_file: If True, logs will be written to a file. If False, only console output (default).
+        log_dir: Directory for log files. If None, only console output (default).
+                 Filename is auto-generated with timestamp.
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     """
+    from datetime import datetime
+
     handlers = []
 
     # Always add console handler
     handlers.append(logging.StreamHandler())
 
     # Optionally add file handler
-    if log_to_file:
-        log_dir = Path("logs")
-        log_dir.mkdir(exist_ok=True)
+    log_filename = None
+    if log_dir:
+        log_path = Path(log_dir)
+        log_path.mkdir(parents=True, exist_ok=True)
         log_filename = (
-            log_dir / f"segmentation_api_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            log_path / f"segmentation_api_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         )
         handlers.append(logging.FileHandler(log_filename, encoding="utf-8"))
 
@@ -89,7 +93,7 @@ def setup_logging(log_to_file: bool = False, log_level: str = "INFO"):
     )
 
     logger = logging.getLogger(__name__)
-    if log_to_file:
+    if log_filename:
         logger.info(f"Logging initialized. Log file: {log_filename}")
     else:
         logger.info("Logging initialized. Console only (file logging disabled)")

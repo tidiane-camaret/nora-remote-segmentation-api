@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 # Configure logging at module import if not already configured
 # This handles the case where uvicorn worker imports the module
 if not logging.getLogger().handlers:
-    log_to_file = os.environ.get("SEGMENTATION_API_LOG_FILE", "false").lower() == "true"
+    log_dir = os.environ.get("SEGMENTATION_API_LOG_DIR", "")
     log_level = os.environ.get("SEGMENTATION_API_LOG_LEVEL", "INFO")
-    setup_logging(log_to_file=log_to_file, log_level=log_level)
+    setup_logging(log_dir=log_dir if log_dir else None, log_level=log_level)
 
 # --- Globals & App Initialization ---
 # Caches will be initialized in main() or at module import based on environment
@@ -737,9 +737,10 @@ def main():
         help="Path to the SSL certificate file.",
     )
     parser.add_argument(
-        "--log-file",
-        action="store_true",
-        help="Enable logging to file (default: console only).",
+        "--log-dir",
+        type=str,
+        default=None,
+        help="Directory for log files. Filename is auto-generated with timestamp. If not specified, only console output.",
     )
     parser.add_argument(
         "--log-level",
@@ -758,12 +759,12 @@ def main():
 
     # Set environment variables for configuration
     # This ensures uvicorn worker processes inherit these settings
-    os.environ["SEGMENTATION_API_LOG_FILE"] = "true" if args.log_file else "false"
+    os.environ["SEGMENTATION_API_LOG_DIR"] = args.log_dir if args.log_dir else ""
     os.environ["SEGMENTATION_API_LOG_LEVEL"] = args.log_level
     os.environ["SEGMENTATION_API_CACHE_DIR"] = args.cache_dir
 
     # Configure logging with CLI arguments
-    setup_logging(log_to_file=args.log_file, log_level=args.log_level)
+    setup_logging(log_dir=args.log_dir, log_level=args.log_level)
 
     # Get logger after setup
     app_logger = logging.getLogger(__name__)
