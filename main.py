@@ -91,6 +91,82 @@ app.add_middleware(
 )
 
 
+# --- Utility Functions ---
+def parse_filepath_with_timestamp(path: str) -> Path:
+    """
+    Extract file path from timestamp-prefixed string.
+
+    Some clients send paths with a timestamp prefix (e.g., "1234567890 /path/to/file.nii").
+    This function strips the prefix and returns the actual path.
+
+    Args:
+        path: Path string, possibly with timestamp prefix
+
+    Returns:
+        Path object for the extracted file path
+    """
+    path = path.strip()
+    if " " in path:
+        # Split and take the last part (the actual file path)
+        path = path.split(maxsplit=1)[1]
+    return Path(path)
+
+
+async def load_roi_from_cache_or_upload(
+    roi_hash: str,
+    file: UploadFile | None,
+    shape: str,
+    dtype: str,
+    compressed: str | None,
+    interaction_type: str = "interaction"
+) -> np.ndarray:
+    """
+    Load ROI from cache or uploaded file.
+
+    Args:
+        roi_hash: Hash identifier for the ROI
+        file: Uploaded file containing ROI data (optional if in cache)
+        shape: JSON string representing ROI shape
+        dtype: Data type of the ROI array
+        compressed: Compression type ("gzip" or None)
+        interaction_type: Type of interaction (for logging purposes)
+
+    Returns:
+        ROI array as numpy array
+
+    Raises:
+        HTTPException: If ROI not in cache and no file provided
+    """
+    # Check if ROI is already cached
+    cached_roi = ROI_CACHE.get(roi_hash)
+    if cached_roi is not None:
+        logger.info(f"ROI {roi_hash} found in cache for {interaction_type}.")
+        return cached_roi
+
+    # ROI not cached, need to load from file
+    if file is None:
+        raise HTTPException(
+            status_code=400, detail="ROI not in cache and no file provided"
+        )
+
+    binary_data = await file.read()
+    shape_tuple = tuple(json.loads(shape))
+    is_compressed = compressed == "gzip"
+    roi_array = deserialize_array(
+        binary_data, shape_tuple, dtype, compressed=is_compressed
+    )
+
+    logger.info(
+        f"Uploaded ROI details - shape: {roi_array.shape}, dtype: {roi_array.dtype}, "
+        f"min: {roi_array.min()}, max: {roi_array.max()}"
+    )
+
+    # Cache the ROI for future use
+    ROI_CACHE.set(roi_hash, roi_array)
+
+    return roi_array
+
+
 # --- Dependencies ---
 async def ensure_active_image(image_hash: str):
     """
@@ -158,29 +234,22 @@ async def check_image_exists(image_hash: str):
 async def check_image_path_accessible(path: str):
     """Checks if an image path is accessible and readable from the server side."""
     try:
+        logger.info(f"Received path: '{path}'")
 
         # Extract the actual path (remove the timestamp prefix if present)
-        path = path.strip()
+        file_path = parse_filepath_with_timestamp(path)
 
-        logger.info(f"recieved path : '{path}'")
-
-        if " " in path:
-            # Split and take the last part (the actual file path)
-            path = path.split(maxsplit=1)[1]
-
-
-        file_path = Path(path)
         # Log the actual path being checked
-        logger.info(f"Checking path accessibility for: '{path}'")
+        logger.info(f"Checking path accessibility for: '{file_path}'")
         logger.info(f"Resolved file_path object: '{file_path}'")
 
         # First check if path exists and is a file
         if not file_path.exists():
-            logger.info(f"Path accessibility check: {path} -> False (does not exist)")
+            logger.info(f"Path accessibility check: {file_path} -> False (does not exist)")
             return {"accessible": False}
 
         if not file_path.is_file():
-            logger.info(f"Path accessibility check: {path} -> False (not a file)")
+            logger.info(f"Path accessibility check: {file_path} -> False (not a file)")
             return {"accessible": False}
 
         # Try to actually load the image and get data from it
@@ -189,12 +258,12 @@ async def check_image_path_accessible(path: str):
             # Try to get the shape without loading all data into memory
             shape = nib_img.shape
             logger.info(
-                f"Path accessibility check: {path} -> True (readable, shape: {shape})"
+                f"Path accessibility check: {file_path} -> True (readable, shape: {shape})"
             )
             return {"accessible": True}
         except Exception as load_error:
             logger.warning(
-                f"Path accessibility check: {path} -> False (cannot load with nibabel: {str(load_error)})"
+                f"Path accessibility check: {file_path} -> False (cannot load with nibabel: {str(load_error)})"
             )
             return {"accessible": False}
 
@@ -202,7 +271,7 @@ async def check_image_path_accessible(path: str):
         logger.error("Path accessibility check failed: nibabel is not installed")
         return {"accessible": False}
     except Exception as e:
-        logger.error(f"Error checking path accessibility for {path}: {str(e)}")
+        logger.error(f"Error checking path accessibility: {str(e)}")
         return {"accessible": False}
 
 
@@ -288,23 +357,17 @@ async def upload_image(
     if absolute_path:
         logger.info(f"Loading image from server path: {absolute_path}")
         try:
-
             # Extract the actual path (remove the timestamp prefix if present)
-            path = absolute_path.strip()
-            logger.info(f"recieved path : '{path}'")
+            file_path = parse_filepath_with_timestamp(absolute_path)
+            logger.info(f"Parsed file path: '{file_path}'")
 
-            if " " in path:
-                # Split and take the last part (the actual file path)
-                path = path.split(maxsplit=1)[1]
-
-            file_path = Path(path)
             if not file_path.exists():
                 raise HTTPException(
-                    status_code=404, detail=f"Image file not found: {absolute_path}"
+                    status_code=404, detail=f"Image file not found: {file_path}"
                 )
             if not file_path.is_file():
                 raise HTTPException(
-                    status_code=400, detail=f"Path is not a file: {absolute_path}"
+                    status_code=400, detail=f"Path is not a file: {file_path}"
                 )
 
             # Load the image using nibabel
@@ -423,32 +486,12 @@ async def add_roi_interaction(
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
-    interactions_were_reset = check_and_reset_interactions(
-        roi_uuid, roi_has_changed_bool
+    check_and_reset_interactions(roi_uuid, roi_has_changed_bool)
+
+    # Load ROI from cache or upload
+    roi_array = await load_roi_from_cache_or_upload(
+        roi_hash, file, shape, dtype, compressed, "roi interaction"
     )
-
-    # Check if ROI is already cached
-    cached_roi = ROI_CACHE.get(roi_hash)
-    if cached_roi is not None:
-        logger.info(f"ROI {roi_hash} found in cache for roi interaction.")
-        roi_array = cached_roi
-    else:
-        if file is None:
-            raise HTTPException(
-                status_code=400, detail="ROI not in cache and no file provided"
-            )
-
-        binary_data = await file.read()
-        shape_tuple = tuple(json.loads(shape))
-        is_compressed = compressed == "gzip"
-        roi_array = deserialize_array(
-            binary_data, shape_tuple, dtype, compressed=is_compressed
-        )
-        logger.info(
-            f"Uploaded ROI details - shape: {roi_array.shape}, dtype: {roi_array.dtype}, min: {roi_array.min()}, max: {roi_array.max()}"
-        )
-        # Cache the ROI
-        ROI_CACHE.set(roi_hash, roi_array)
 
     # Set the roi in the prompt manager and run prediction
     # Note: set_segment is always called for roi_interaction endpoint since the ROI itself is the prompt
@@ -511,24 +554,10 @@ async def add_bbox_interaction(
     # --- Process the uploaded ROI mask ---
     # Only load and set ROI if interactions were reset (otherwise we preserve existing interactions)
     if interactions_were_reset:
-        # Check if ROI is already cached
-        cached_roi = ROI_CACHE.get(roi_hash)
-        if cached_roi is not None:
-            logger.info(f"ROI {roi_hash} found in cache for bbox interaction.")
-            roi_array = cached_roi
-        else:
-            if file is None:
-                raise HTTPException(
-                    status_code=400, detail="ROI not in cache and no file provided"
-                )
-            binary_data = await file.read()
-            shape_tuple = tuple(json.loads(shape))
-            is_compressed = compressed == "gzip"
-            roi_array = deserialize_array(
-                binary_data, shape_tuple, dtype, compressed=is_compressed
-            )
-            # Cache the ROI
-            ROI_CACHE.set(roi_hash, roi_array)
+        # Load ROI from cache or upload
+        roi_array = await load_roi_from_cache_or_upload(
+            roi_hash, file, shape, dtype, compressed, "bbox interaction"
+        )
 
         # Set the base ROI mask in the prompt manager without running prediction yet
         pm.set_segment(roi_array, run_prediction=False)
@@ -603,26 +632,14 @@ async def add_scribble_interaction(
     # --- Process the uploaded ROI mask ---
     # Only load and set ROI if interactions were reset (otherwise we preserve existing interactions)
     if interactions_were_reset:
-        # Check if ROI is already cached
-        cached_roi = ROI_CACHE.get(roi_hash)
-        if cached_roi is not None:
-            logger.info(f"ROI {roi_hash} found in cache for scribble interaction.")
-            roi_array = cached_roi
-        else:
-            if file is None:
-                raise HTTPException(
-                    status_code=400, detail="ROI not in cache and no file provided"
-                )
-            binary_data = await file.read()
-            shape_tuple = tuple(json.loads(shape))
-            is_compressed = compressed == "gzip"
-            roi_array = deserialize_array(
-                binary_data, shape_tuple, dtype, compressed=is_compressed
-            )
-            mean_roi_slice = np.mean(roi_array, axis=0)
-            plt.imsave("mean_roi_slice.png", mean_roi_slice)
-            # Cache the ROI
-            ROI_CACHE.set(roi_hash, roi_array)
+        # Load ROI from cache or upload
+        roi_array = await load_roi_from_cache_or_upload(
+            roi_hash, file, shape, dtype, compressed, "scribble interaction"
+        )
+
+        # Debug visualization
+        mean_roi_slice = np.mean(roi_array, axis=0)
+        plt.imsave("mean_roi_slice.png", mean_roi_slice)
 
         # Set the base ROI mask in the prompt manager without running prediction yet
         pm.set_segment(roi_array, run_prediction=False)
@@ -712,24 +729,10 @@ async def add_point_interaction(
     # --- Process the uploaded ROI mask ---
     # Only load and set ROI if interactions were reset (otherwise we preserve existing interactions)
     if interactions_were_reset:
-        # Check if ROI is already cached
-        cached_roi = ROI_CACHE.get(roi_hash)
-        if cached_roi is not None:
-            logger.info(f"ROI {roi_hash} found in cache for point interaction.")
-            roi_array = cached_roi
-        else:
-            if file is None:
-                raise HTTPException(
-                    status_code=400, detail="ROI not in cache and no file provided"
-                )
-            binary_data = await file.read()
-            shape_tuple = tuple(json.loads(shape))
-            is_compressed = compressed == "gzip"
-            roi_array = deserialize_array(
-                binary_data, shape_tuple, dtype, compressed=is_compressed
-            )
-            # Cache the ROI
-            ROI_CACHE.set(roi_hash, roi_array)
+        # Load ROI from cache or upload
+        roi_array = await load_roi_from_cache_or_upload(
+            roi_hash, file, shape, dtype, compressed, "point interaction"
+        )
 
         # Set the base ROI mask in the prompt manager without running prediction yet
         pm.set_segment(roi_array, run_prediction=False)
