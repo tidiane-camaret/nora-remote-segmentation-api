@@ -154,7 +154,7 @@ async def check_image_exists(image_hash: str):
     return {"exists": image_hash in IMAGE_CACHE}
 
 
-#@app.get("/check_image_path")
+@app.get("/check_image_path")
 async def check_image_path_accessible(path: str):
     """Checks if an image path is accessible and readable from the server side."""
     try:
@@ -867,7 +867,7 @@ def main():
         port=args.port,
         ssl_keyfile=args.ssl_keyfile,
         ssl_certfile=args.ssl_certfile,
-        reload=True,
+        reload=False,
         reload_excludes=["logs/*", "data/*", ".venv/*"],
         # reload_dirs=os.path.dirname(os.path.abspath(__file__))
     )
