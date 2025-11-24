@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import nibabel as nib
 import numpy as np
 import uvicorn
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
@@ -12,8 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from src.prompt_manager import PromptManager
 from src.utils import (
-    ArrayCache,
     GPU_AVAILABLE,
+    ArrayCache,
     deserialize_array,
     get_job_cgroup_memory_usage,
     get_slurm_memory_limit,
@@ -55,7 +56,9 @@ def init_caches(persist_dir: str | None = None):
         cache_name="Image",
         compress=False,
         persist_dir=persist_dir,
-        max_disk_size_bytes=30 * 1024 * 1024 * 1024 if persist_dir else None  # 30 GB disk storage
+        max_disk_size_bytes=(
+            30 * 1024 * 1024 * 1024 if persist_dir else None
+        ),  # 30 GB disk storage
     )  # 5 GB RAM, 30 GB disk (if persistence enabled)
 
     ROI_CACHE = ArrayCache(
@@ -63,7 +66,9 @@ def init_caches(persist_dir: str | None = None):
         cache_name="ROI",
         compress=True,
         persist_dir=persist_dir,
-        max_disk_size_bytes=2 * 1024 * 1024 * 1024 if persist_dir else None  # 2 GB disk storage
+        max_disk_size_bytes=(
+            2 * 1024 * 1024 * 1024 if persist_dir else None
+        ),  # 2 GB disk storage
     )  # 512 MB RAM (compressed), 2 GB disk (if persistence enabled)
 
 
@@ -149,13 +154,25 @@ async def check_image_exists(image_hash: str):
     return {"exists": image_hash in IMAGE_CACHE}
 
 
-@app.get("/check_image_path")
+#@app.get("/check_image_path")
 async def check_image_path_accessible(path: str):
     """Checks if an image path is accessible and readable from the server side."""
     try:
-        import nibabel as nib
+
+        # Extract the actual path (remove the timestamp prefix if present)
+        path = path.strip()
+
+        logger.info(f"recieved path : '{path}'")
+
+        if " " in path:
+            # Split and take the last part (the actual file path)
+            path = path.split(maxsplit=1)[1]
+
 
         file_path = Path(path)
+        # Log the actual path being checked
+        logger.info(f"Checking path accessibility for: '{path}'")
+        logger.info(f"Resolved file_path object: '{file_path}'")
 
         # First check if path exists and is a file
         if not file_path.exists():
@@ -215,11 +232,7 @@ async def reset_interactions(roi_uuid: str = Form(...)):
 
     if CURRENT_ROI_UUID is None:
         logger.warning("No active ROI session. Nothing to reset.")
-        return {
-            "status": "warning",
-            "message": "No active ROI session",
-            "reset": False
-        }
+        return {"status": "warning", "message": "No active ROI session", "reset": False}
 
     if CURRENT_ROI_UUID != roi_uuid:
         logger.warning(
@@ -228,7 +241,7 @@ async def reset_interactions(roi_uuid: str = Form(...)):
         return {
             "status": "warning",
             "message": f"UUID mismatch. Current session UUID: {CURRENT_ROI_UUID}",
-            "reset": False
+            "reset": False,
         }
 
     # UUIDs match - reset interactions
@@ -238,7 +251,7 @@ async def reset_interactions(roi_uuid: str = Form(...)):
     return {
         "status": "ok",
         "message": f"Interactions reset for ROI UUID: {roi_uuid}",
-        "reset": True
+        "reset": True,
     }
 
 
@@ -255,7 +268,7 @@ async def submit_bug_report(roi_uuid: str = Form(...), report_text: str = Form(.
 
     return {
         "status": "ok",
-        "message": "Bug report received. Thank you for your feedback!"
+        "message": "Bug report received. Thank you for your feedback!",
     }
 
 
@@ -275,9 +288,16 @@ async def upload_image(
     if absolute_path:
         logger.info(f"Loading image from server path: {absolute_path}")
         try:
-            import nibabel as nib
 
-            file_path = Path(absolute_path)
+            # Extract the actual path (remove the timestamp prefix if present)
+            path = absolute_path.strip()
+            logger.info(f"recieved path : '{path}'")
+
+            if " " in path:
+                # Split and take the last part (the actual file path)
+                path = path.split(maxsplit=1)[1]
+
+            file_path = Path(path)
             if not file_path.exists():
                 raise HTTPException(
                     status_code=404, detail=f"Image file not found: {absolute_path}"
@@ -307,7 +327,9 @@ async def upload_image(
         logger.info("Loading image from uploaded file data")
         binary_data = await file.read()
         shape_tuple = tuple(json.loads(shape))
-        img_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=False, log_stats=False)
+        img_array = deserialize_array(
+            binary_data, shape_tuple, dtype, compressed=False, log_stats=False
+        )
 
     size_mb = img_array.nbytes / (1024**2)
     logger.info(
@@ -360,7 +382,9 @@ async def upload_roi(
     binary_data = await file.read()
     shape_tuple = tuple(json.loads(shape))
     is_compressed = compressed == "gzip"
-    roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
+    roi_array = deserialize_array(
+        binary_data, shape_tuple, dtype, compressed=is_compressed
+    )
     size_mb = roi_array.nbytes / (1024**2)
     logger.info(
         f"ROI details - shape: {roi_array.shape}, dtype: {roi_array.dtype}, size: {size_mb:.2f} MB, min: {roi_array.min()}, max: {roi_array.max()}"
@@ -399,7 +423,9 @@ async def add_roi_interaction(
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
-    interactions_were_reset = check_and_reset_interactions(roi_uuid, roi_has_changed_bool)
+    interactions_were_reset = check_and_reset_interactions(
+        roi_uuid, roi_has_changed_bool
+    )
 
     # Check if ROI is already cached
     cached_roi = ROI_CACHE.get(roi_hash)
@@ -415,7 +441,9 @@ async def add_roi_interaction(
         binary_data = await file.read()
         shape_tuple = tuple(json.loads(shape))
         is_compressed = compressed == "gzip"
-        roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
+        roi_array = deserialize_array(
+            binary_data, shape_tuple, dtype, compressed=is_compressed
+        )
         logger.info(
             f"Uploaded ROI details - shape: {roi_array.shape}, dtype: {roi_array.dtype}, min: {roi_array.min()}, max: {roi_array.max()}"
         )
@@ -476,7 +504,9 @@ async def add_bbox_interaction(
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
-    interactions_were_reset = check_and_reset_interactions(roi_uuid, roi_has_changed_bool)
+    interactions_were_reset = check_and_reset_interactions(
+        roi_uuid, roi_has_changed_bool
+    )
 
     # --- Process the uploaded ROI mask ---
     # Only load and set ROI if interactions were reset (otherwise we preserve existing interactions)
@@ -494,7 +524,9 @@ async def add_bbox_interaction(
             binary_data = await file.read()
             shape_tuple = tuple(json.loads(shape))
             is_compressed = compressed == "gzip"
-            roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
+            roi_array = deserialize_array(
+                binary_data, shape_tuple, dtype, compressed=is_compressed
+            )
             # Cache the ROI
             ROI_CACHE.set(roi_hash, roi_array)
 
@@ -502,7 +534,9 @@ async def add_bbox_interaction(
         pm.set_segment(roi_array, run_prediction=False)
         logger.info("Base ROI mask set for bbox interaction (interactions were reset).")
     else:
-        logger.info("Skipping set_segment for bbox interaction (preserving existing interactions).")
+        logger.info(
+            "Skipping set_segment for bbox interaction (preserving existing interactions)."
+        )
 
     # Call the bounding box interaction method
     seg_result = pm.add_bbox_interaction(
@@ -562,7 +596,9 @@ async def add_scribble_interaction(
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
-    interactions_were_reset = check_and_reset_interactions(roi_uuid, roi_has_changed_bool)
+    interactions_were_reset = check_and_reset_interactions(
+        roi_uuid, roi_has_changed_bool
+    )
 
     # --- Process the uploaded ROI mask ---
     # Only load and set ROI if interactions were reset (otherwise we preserve existing interactions)
@@ -580,7 +616,9 @@ async def add_scribble_interaction(
             binary_data = await file.read()
             shape_tuple = tuple(json.loads(shape))
             is_compressed = compressed == "gzip"
-            roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
+            roi_array = deserialize_array(
+                binary_data, shape_tuple, dtype, compressed=is_compressed
+            )
             mean_roi_slice = np.mean(roi_array, axis=0)
             plt.imsave("mean_roi_slice.png", mean_roi_slice)
             # Cache the ROI
@@ -588,9 +626,13 @@ async def add_scribble_interaction(
 
         # Set the base ROI mask in the prompt manager without running prediction yet
         pm.set_segment(roi_array, run_prediction=False)
-        logger.info("Base ROI mask set for scribble interaction (interactions were reset).")
+        logger.info(
+            "Base ROI mask set for scribble interaction (interactions were reset)."
+        )
     else:
-        logger.info("Skipping set_segment for scribble interaction (preserving existing interactions).")
+        logger.info(
+            "Skipping set_segment for scribble interaction (preserving existing interactions)."
+        )
 
     # Create a mask from scribble coordinates
     scribbles_mask = pm.create_mask_from_scribbles(
@@ -655,7 +697,7 @@ async def add_point_interaction(
     if len(point_params.point_coords) != len(point_params.point_labels):
         raise HTTPException(
             status_code=400,
-            detail=f"point_coords and point_labels must have the same length. Got {len(point_params.point_coords)} coords and {len(point_params.point_labels)} labels"
+            detail=f"point_coords and point_labels must have the same length. Got {len(point_params.point_coords)} coords and {len(point_params.point_labels)} labels",
         )
 
     # Ensure the correct image is active
@@ -663,7 +705,9 @@ async def add_point_interaction(
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
-    interactions_were_reset = check_and_reset_interactions(roi_uuid, roi_has_changed_bool)
+    interactions_were_reset = check_and_reset_interactions(
+        roi_uuid, roi_has_changed_bool
+    )
 
     # --- Process the uploaded ROI mask ---
     # Only load and set ROI if interactions were reset (otherwise we preserve existing interactions)
@@ -681,29 +725,39 @@ async def add_point_interaction(
             binary_data = await file.read()
             shape_tuple = tuple(json.loads(shape))
             is_compressed = compressed == "gzip"
-            roi_array = deserialize_array(binary_data, shape_tuple, dtype, compressed=is_compressed)
+            roi_array = deserialize_array(
+                binary_data, shape_tuple, dtype, compressed=is_compressed
+            )
             # Cache the ROI
             ROI_CACHE.set(roi_hash, roi_array)
 
         # Set the base ROI mask in the prompt manager without running prediction yet
         pm.set_segment(roi_array, run_prediction=False)
-        logger.info("Base ROI mask set for point interaction (interactions were reset).")
+        logger.info(
+            "Base ROI mask set for point interaction (interactions were reset)."
+        )
     else:
-        logger.info("Skipping set_segment for point interaction (preserving existing interactions).")
+        logger.info(
+            "Skipping set_segment for point interaction (preserving existing interactions)."
+        )
 
     # Add all points - run prediction only on the last one
     seg_result = None
     num_points = len(point_params.point_coords)
-    for i, (point_coord, point_label) in enumerate(zip(point_params.point_coords, point_params.point_labels)):
-        is_last_point = (i == num_points - 1)
-        include_interaction = (point_label == 1)  # 1 = positive, 0 = negative
+    for i, (point_coord, point_label) in enumerate(
+        zip(point_params.point_coords, point_params.point_labels)
+    ):
+        is_last_point = i == num_points - 1
+        include_interaction = point_label == 1  # 1 = positive, 0 = negative
 
-        logger.info(f"Adding point {i+1}/{num_points}: {point_coord}, label: {point_label} (positive: {include_interaction}), run_prediction: {is_last_point}")
+        logger.info(
+            f"Adding point {i+1}/{num_points}: {point_coord}, label: {point_label} (positive: {include_interaction}), run_prediction: {is_last_point}"
+        )
 
         result = pm.add_point_interaction(
             point_coord,
             include_interaction=include_interaction,
-            run_prediction=is_last_point
+            run_prediction=is_last_point,
         )
 
         if is_last_point:
@@ -790,14 +844,20 @@ def main():
     # Log memory configuration
     slurm_limit = get_slurm_memory_limit()
     if slurm_limit:
-        app_logger.info(f"Running in Slurm job with {slurm_limit / (1024**3):.2f} GB memory allocation")
+        app_logger.info(
+            f"Running in Slurm job with {slurm_limit / (1024**3):.2f} GB memory allocation"
+        )
 
         # Debug: Show cgroup detection
         cgroup_usage = get_job_cgroup_memory_usage()
         if cgroup_usage:
-            app_logger.info(f"Cgroup memory tracking enabled (current: {cgroup_usage / (1024**3):.2f} GB)")
+            app_logger.info(
+                f"Cgroup memory tracking enabled (current: {cgroup_usage / (1024**3):.2f} GB)"
+            )
         else:
-            app_logger.warning("Cgroup memory tracking not available - will use process memory only")
+            app_logger.warning(
+                "Cgroup memory tracking not available - will use process memory only"
+            )
     else:
         app_logger.info("Not running in Slurm job - using system memory")
 
@@ -808,6 +868,7 @@ def main():
         ssl_keyfile=args.ssl_keyfile,
         ssl_certfile=args.ssl_certfile,
         reload=True,
+        reload_excludes=["logs/*", "data/*", ".venv/*"],
         # reload_dirs=os.path.dirname(os.path.abspath(__file__))
     )
 
