@@ -372,9 +372,12 @@ async def upload_image(
 
             # Load the image using nibabel
             nib_img = nib.load(str(file_path))
+            # NiBabel returns data in (x, y, z) order, but client expects (z, y, x)
+            # Transpose to match the expected array format
             img_array = nib_img.get_fdata().astype(np.float32)
+            img_array = np.transpose(img_array, (2, 1, 0))  # (x, y, z) -> (z, y, x)
             logger.info(
-                f"Loaded image from path - shape: {img_array.shape}, dtype: {img_array.dtype}"
+                f"Loaded image from path - shape: {img_array.shape} (transposed to z,y,x), dtype: {img_array.dtype}"
             )
 
         except ImportError:
