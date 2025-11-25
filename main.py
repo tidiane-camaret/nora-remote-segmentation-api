@@ -40,6 +40,8 @@ ROI_CACHE = None
 PROMPT_MANAGER = PromptManager()
 CURRENT_IMAGE_HASH = None  # Tracks the image hash currently loaded in PROMPT_MANAGER
 CURRENT_ROI_UUID = None  # Tracks the ROI UUID currently active in PROMPT_MANAGER
+CURRENT_CLIM0 = None  # Tracks the lower histogram boundary currently applied
+CURRENT_CLIM1 = None  # Tracks the upper histogram boundary currently applied
 
 
 def init_caches(persist_dir: str | None = None):
@@ -92,6 +94,29 @@ app.add_middleware(
 
 
 # --- Utility Functions ---
+def apply_histogram_trimming(image_array: np.ndarray, clim0: float, clim1: float) -> np.ndarray:
+    """
+    Apply histogram trimming to an image array by clipping values to [clim0, clim1].
+
+    Args:
+        image_array: Input image array
+        clim0: Lower histogram boundary
+        clim1: Upper histogram boundary
+
+    Returns:
+        Trimmed image array (clipped to [clim0, clim1])
+    """
+    logger.info(f"Applying histogram trimming: clim0={clim0}, clim1={clim1}")
+    logger.info(f"Image stats before trimming: min={image_array.min():.2f}, max={image_array.max():.2f}, mean={image_array.mean():.2f}")
+
+    # Clip the image values to the histogram boundaries
+    trimmed_array = np.clip(image_array, clim0, clim1)
+
+    logger.info(f"Image stats after trimming: min={trimmed_array.min():.2f}, max={trimmed_array.max():.2f}, mean={trimmed_array.mean():.2f}")
+
+    return trimmed_array
+
+
 def parse_filepath_with_timestamp(path: str) -> Path:
     """
     Extract file path from timestamp-prefixed string.
@@ -168,21 +193,51 @@ async def load_roi_from_cache_or_upload(
 
 
 # --- Dependencies ---
-async def ensure_active_image(image_hash: str):
+async def ensure_active_image(image_hash: str, clim0: float, clim1: float):
     """
-    A dependency that ensures the correct image is loaded into the PROMPT_MANAGER.
+    A dependency that ensures the correct image with proper histogram trimming is loaded into the PROMPT_MANAGER.
+
+    Args:
+        image_hash: Hash identifier for the image
+        clim0: Lower histogram boundary
+        clim1: Upper histogram boundary
+
+    Returns:
+        PROMPT_MANAGER instance with the correct image loaded
     """
-    global CURRENT_IMAGE_HASH
-    if image_hash != CURRENT_IMAGE_HASH:
+    global CURRENT_IMAGE_HASH, CURRENT_CLIM0, CURRENT_CLIM1
+
+    # Check if we need to reload/reprocess the image
+    needs_update = (
+        image_hash != CURRENT_IMAGE_HASH
+        or clim0 != CURRENT_CLIM0
+        or clim1 != CURRENT_CLIM1
+    )
+
+    if needs_update:
+        # Load image from cache
         image_data = IMAGE_CACHE.get(image_hash)
         if image_data is None:
             raise HTTPException(
                 status_code=404, detail=f"Image {image_hash} not found in cache"
             )
 
-        logger.info(f"Switching active image from {CURRENT_IMAGE_HASH} to {image_hash}")
-        PROMPT_MANAGER.set_image(image_data)
+        logger.info(
+            f"Updating active image: hash={image_hash} (prev: {CURRENT_IMAGE_HASH}), "
+            f"clim=[{clim0}, {clim1}] (prev: [{CURRENT_CLIM0}, {CURRENT_CLIM1}])"
+        )
+
+        # Apply histogram trimming
+        trimmed_image = apply_histogram_trimming(image_data, clim0, clim1)
+
+        # Set the trimmed image in the prompt manager
+        PROMPT_MANAGER.set_image(trimmed_image)
+
+        # Update global state
         CURRENT_IMAGE_HASH = image_hash
+        CURRENT_CLIM0 = clim0
+        CURRENT_CLIM1 = clim1
+
     return PROMPT_MANAGER
 
 
@@ -283,10 +338,33 @@ async def check_roi_exists(roi_hash: str):
 
 @app.post("/set_active_image/{image_hash}")
 async def set_active_image(
-    image_hash: str, pm: PromptManager = Depends(ensure_active_image)
+    image_hash: str,
+    clim0: float = Form(None),
+    clim1: float = Form(None),
 ):
-    """Sets the active image for the global prompt manager from the cache."""
-    return {"status": "ok", "message": f"Active image set to {image_hash}"}
+    """
+    Sets the active image for the global prompt manager from the cache.
+    Optionally applies histogram trimming if clim0 and clim1 are provided.
+    """
+    if clim0 is not None and clim1 is not None:
+        pm = await ensure_active_image(image_hash, clim0, clim1)
+        return {
+            "status": "ok",
+            "message": f"Active image set to {image_hash} with histogram trimming [{clim0}, {clim1}]",
+        }
+    else:
+        # Load without histogram trimming (use full range)
+        image_data = IMAGE_CACHE.get(image_hash)
+        if image_data is None:
+            raise HTTPException(
+                status_code=404, detail=f"Image {image_hash} not found in cache"
+            )
+        PROMPT_MANAGER.set_image(image_data)
+        global CURRENT_IMAGE_HASH, CURRENT_CLIM0, CURRENT_CLIM1
+        CURRENT_IMAGE_HASH = image_hash
+        CURRENT_CLIM0 = None
+        CURRENT_CLIM1 = None
+        return {"status": "ok", "message": f"Active image set to {image_hash} (no trimming)"}
 
 
 @app.post("/reset_interactions")
@@ -473,6 +551,8 @@ async def add_roi_interaction(
     roi_hash: str = Form(...),
     roi_uuid: str = Form(...),
     roi_has_changed: str = Form(...),
+    clim0: float = Form(...),
+    clim1: float = Form(...),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
@@ -481,11 +561,11 @@ async def add_roi_interaction(
     Similar to bbox/scribble interactions but uses the ROI as the only prompt.
     """
     logger.info(
-        f"=== ADD ROI INTERACTION START === image: {image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}"
+        f"=== ADD ROI INTERACTION START === image: {image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}, clim: [{clim0}, {clim1}]"
     )
     log_memory_usage("BEFORE")
 
-    pm = await ensure_active_image(image_hash)
+    pm = await ensure_active_image(image_hash, clim0, clim1)
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
@@ -531,6 +611,8 @@ async def add_bbox_interaction(
     roi_hash: str = Form(...),
     roi_uuid: str = Form(...),
     roi_has_changed: str = Form(...),
+    clim0: float = Form(...),
+    clim1: float = Form(...),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
@@ -541,12 +623,12 @@ async def add_bbox_interaction(
     # Parse interaction parameters from JSON string
     bbox_params = BBoxParams(**json.loads(params))
     logger.info(
-        f"=== ADD BBOX INTERACTION START === image: {bbox_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}"
+        f"=== ADD BBOX INTERACTION START === image: {bbox_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}, clim: [{clim0}, {clim1}]"
     )
     log_memory_usage("BEFORE")
 
     # Ensure the correct image is active
-    pm = await ensure_active_image(bbox_params.image_hash)
+    pm = await ensure_active_image(bbox_params.image_hash, clim0, clim1)
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
@@ -606,6 +688,8 @@ async def add_scribble_interaction(
     roi_hash: str = Form(...),
     roi_uuid: str = Form(...),
     roi_has_changed: str = Form(...),
+    clim0: float = Form(...),
+    clim1: float = Form(...),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
@@ -616,7 +700,7 @@ async def add_scribble_interaction(
     # Parse interaction parameters from JSON string
     scribble_params = ScribbleParams(**json.loads(params))
     logger.info(
-        f"=== ADD SCRIBBLE INTERACTION START === image: {scribble_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}"
+        f"=== ADD SCRIBBLE INTERACTION START === image: {scribble_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}, clim: [{clim0}, {clim1}]"
     )
     logger.info(
         f"Scribble details: {len(scribble_params.scribble_coords)} points, label: {scribble_params.scribble_labels[0]}"
@@ -624,7 +708,7 @@ async def add_scribble_interaction(
     log_memory_usage("BEFORE")
 
     # Ensure the correct image is active
-    pm = await ensure_active_image(scribble_params.image_hash)
+    pm = await ensure_active_image(scribble_params.image_hash, clim0, clim1)
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
@@ -695,6 +779,8 @@ async def add_point_interaction(
     roi_hash: str = Form(...),
     roi_uuid: str = Form(...),
     roi_has_changed: str = Form(...),
+    clim0: float = Form(...),
+    clim1: float = Form(...),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
@@ -706,7 +792,7 @@ async def add_point_interaction(
     # Parse interaction parameters from JSON string
     point_params = PointParams(**json.loads(params))
     logger.info(
-        f"=== ADD POINT INTERACTION START === image: {point_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}"
+        f"=== ADD POINT INTERACTION START === image: {point_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}, clim: [{clim0}, {clim1}]"
     )
     logger.info(
         f"Number of points: {len(point_params.point_coords)}, coords: {point_params.point_coords}, labels: {point_params.point_labels}"
@@ -721,7 +807,7 @@ async def add_point_interaction(
         )
 
     # Ensure the correct image is active
-    pm = await ensure_active_image(point_params.image_hash)
+    pm = await ensure_active_image(point_params.image_hash, clim0, clim1)
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
