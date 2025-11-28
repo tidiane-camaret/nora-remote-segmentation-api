@@ -40,10 +40,6 @@ ROI_CACHE = None
 PROMPT_MANAGER = PromptManager()
 CURRENT_IMAGE_HASH = None  # Tracks the image hash currently loaded in PROMPT_MANAGER
 CURRENT_ROI_UUID = None  # Tracks the ROI UUID currently active in PROMPT_MANAGER
-CURRENT_CLIM0 = None  # Tracks the lower histogram boundary currently applied
-CURRENT_CLIM1 = None  # Tracks the upper histogram boundary currently applied
-CURRENT_SLOPE = None  # Tracks the NIfTI slope currently applied
-CURRENT_OFFSET = None  # Tracks the NIfTI offset currently applied
 
 
 def init_caches(persist_dir: str | None = None):
@@ -95,174 +91,22 @@ app.add_middleware(
 )
 
 
-# --- Utility Functions ---
-def apply_histogram_trimming(image_array: np.ndarray, clim0: float, clim1: float, slope: float = 1.0, offset: float = 0.0) -> np.ndarray:
-    """
-    Apply histogram trimming to an image array by clipping values to [clim0, clim1].
-
-    The clim values are provided in real-world units (after NIfTI datascaling).
-    This function converts them to internal storage space before clipping.
-
-    NIfTI datascaling: real_world_value = slope * stored_value + offset
-    Inverse: stored_value = (real_world_value - offset) / slope
-
-    Args:
-        image_array: Input image array (in internal/stored units)
-        clim0: Lower histogram boundary (in real-world units)
-        clim1: Upper histogram boundary (in real-world units)
-        slope: NIfTI datascaling slope (default: 1.0)
-        offset: NIfTI datascaling offset (default: 0.0)
-
-    Returns:
-        Trimmed image array (clipped to converted [clim0, clim1])
-    """
-    # Convert real-world clim values to internal storage space
-    # internal = (real_world - offset) / slope
-    clim0_internal = (clim0 - offset) / slope
-    clim1_internal = (clim1 - offset) / slope
-
-    logger.info(f"Applying histogram trimming:")
-    logger.info(f"  Real-world units: clim0={clim0:.2f}, clim1={clim1:.2f}")
-    logger.info(f"  NIfTI scaling: slope={slope}, offset={offset}")
-    logger.info(f"  Internal units: clim0={clim0_internal:.2f}, clim1={clim1_internal:.2f}")
-    logger.info(f"  Image stats before trimming: min={image_array.min():.2f}, max={image_array.max():.2f}, mean={image_array.mean():.2f}")
-
-    # Clip the image values to the histogram boundaries (in internal space)
-    trimmed_array = np.clip(image_array, clim0_internal, clim1_internal)
-
-    logger.info(f"  Image stats after trimming: min={trimmed_array.min():.2f}, max={trimmed_array.max():.2f}, mean={trimmed_array.mean():.2f}")
-
-    return trimmed_array
-
-
-def parse_filepath_with_timestamp(path: str) -> Path:
-    """
-    Extract file path from timestamp-prefixed string.
-
-    Some clients send paths with a timestamp prefix (e.g., "1234567890 /path/to/file.nii").
-    This function strips the prefix and returns the actual path.
-
-    Args:
-        path: Path string, possibly with timestamp prefix
-
-    Returns:
-        Path object for the extracted file path
-    """
-    path = path.strip()
-    if " " in path:
-        # Split and take the last part (the actual file path)
-        path = path.split(maxsplit=1)[1]
-    return Path(path)
-
-
-async def load_roi_from_cache_or_upload(
-    roi_hash: str,
-    file: UploadFile | None,
-    shape: str,
-    dtype: str,
-    compressed: str | None,
-    interaction_type: str = "interaction"
-) -> np.ndarray:
-    """
-    Load ROI from cache or uploaded file.
-
-    Args:
-        roi_hash: Hash identifier for the ROI
-        file: Uploaded file containing ROI data (optional if in cache)
-        shape: JSON string representing ROI shape
-        dtype: Data type of the ROI array
-        compressed: Compression type ("gzip" or None)
-        interaction_type: Type of interaction (for logging purposes)
-
-    Returns:
-        ROI array as numpy array
-
-    Raises:
-        HTTPException: If ROI not in cache and no file provided
-    """
-    # Check if ROI is already cached
-    cached_roi = ROI_CACHE.get(roi_hash)
-    if cached_roi is not None:
-        logger.info(f"ROI {roi_hash} found in cache for {interaction_type}.")
-        return cached_roi
-
-    # ROI not cached, need to load from file
-    if file is None:
-        raise HTTPException(
-            status_code=400, detail="ROI not in cache and no file provided"
-        )
-
-    binary_data = await file.read()
-    shape_tuple = tuple(json.loads(shape))
-    is_compressed = compressed == "gzip"
-    roi_array = deserialize_array(
-        binary_data, shape_tuple, dtype, compressed=is_compressed
-    )
-
-    logger.info(
-        f"Uploaded ROI details - shape: {roi_array.shape}, dtype: {roi_array.dtype}, "
-        f"min: {roi_array.min()}, max: {roi_array.max()}"
-    )
-
-    # Cache the ROI for future use
-    ROI_CACHE.set(roi_hash, roi_array)
-
-    return roi_array
-
-
 # --- Dependencies ---
-async def ensure_active_image(image_hash: str, clim0: float, clim1: float, slope: float = 1.0, offset: float = 0.0):
+async def ensure_active_image(image_hash: str):
     """
-    A dependency that ensures the correct image with proper histogram trimming is loaded into the PROMPT_MANAGER.
-
-    Args:
-        image_hash: Hash identifier for the image
-        clim0: Lower histogram boundary (in real-world units)
-        clim1: Upper histogram boundary (in real-world units)
-        slope: NIfTI datascaling slope
-        offset: NIfTI datascaling offset
-
-    Returns:
-        PROMPT_MANAGER instance with the correct image loaded
+    A dependency that ensures the correct image is loaded into the PROMPT_MANAGER.
     """
-    global CURRENT_IMAGE_HASH, CURRENT_CLIM0, CURRENT_CLIM1, CURRENT_SLOPE, CURRENT_OFFSET
-
-    # Check if we need to reload/reprocess the image
-    needs_update = (
-        image_hash != CURRENT_IMAGE_HASH
-        or clim0 != CURRENT_CLIM0
-        or clim1 != CURRENT_CLIM1
-        or slope != CURRENT_SLOPE
-        or offset != CURRENT_OFFSET
-    )
-
-    if needs_update:
-        # Load image from cache
+    global CURRENT_IMAGE_HASH
+    if image_hash != CURRENT_IMAGE_HASH:
         image_data = IMAGE_CACHE.get(image_hash)
         if image_data is None:
             raise HTTPException(
                 status_code=404, detail=f"Image {image_hash} not found in cache"
             )
 
-        logger.info(
-            f"Updating active image: hash={image_hash} (prev: {CURRENT_IMAGE_HASH}), "
-            f"clim=[{clim0}, {clim1}] (prev: [{CURRENT_CLIM0}, {CURRENT_CLIM1}]), "
-            f"slope={slope} (prev: {CURRENT_SLOPE}), offset={offset} (prev: {CURRENT_OFFSET})"
-        )
-
-        # Apply histogram trimming with proper unit conversion
-        trimmed_image = apply_histogram_trimming(image_data, clim0, clim1, slope, offset)
-
-        # Set the trimmed image in the prompt manager
-        PROMPT_MANAGER.set_image(trimmed_image)
-
-        # Update global state
+        logger.info(f"Switching active image from {CURRENT_IMAGE_HASH} to {image_hash}")
+        PROMPT_MANAGER.set_image(image_data)
         CURRENT_IMAGE_HASH = image_hash
-        CURRENT_CLIM0 = clim0
-        CURRENT_CLIM1 = clim1
-        CURRENT_SLOPE = slope
-        CURRENT_OFFSET = offset
-
     return PROMPT_MANAGER
 
 
@@ -310,26 +154,33 @@ async def check_image_exists(image_hash: str):
     return {"exists": image_hash in IMAGE_CACHE}
 
 
-@app.get("/check_image_path")
+#@app.get("/check_image_path")
 async def check_image_path_accessible(path: str):
     """Checks if an image path is accessible and readable from the server side."""
     try:
-        logger.info(f"Received path: '{path}'")
 
         # Extract the actual path (remove the timestamp prefix if present)
-        file_path = parse_filepath_with_timestamp(path)
+        path = path.strip()
 
+        logger.info(f"recieved path : '{path}'")
+
+        if " " in path:
+            # Split and take the last part (the actual file path)
+            path = path.split(maxsplit=1)[1]
+
+
+        file_path = Path(path)
         # Log the actual path being checked
-        logger.info(f"Checking path accessibility for: '{file_path}'")
+        logger.info(f"Checking path accessibility for: '{path}'")
         logger.info(f"Resolved file_path object: '{file_path}'")
 
         # First check if path exists and is a file
         if not file_path.exists():
-            logger.info(f"Path accessibility check: {file_path} -> False (does not exist)")
+            logger.info(f"Path accessibility check: {path} -> False (does not exist)")
             return {"accessible": False}
 
         if not file_path.is_file():
-            logger.info(f"Path accessibility check: {file_path} -> False (not a file)")
+            logger.info(f"Path accessibility check: {path} -> False (not a file)")
             return {"accessible": False}
 
         # Try to actually load the image and get data from it
@@ -338,12 +189,12 @@ async def check_image_path_accessible(path: str):
             # Try to get the shape without loading all data into memory
             shape = nib_img.shape
             logger.info(
-                f"Path accessibility check: {file_path} -> True (readable, shape: {shape})"
+                f"Path accessibility check: {path} -> True (readable, shape: {shape})"
             )
             return {"accessible": True}
         except Exception as load_error:
             logger.warning(
-                f"Path accessibility check: {file_path} -> False (cannot load with nibabel: {str(load_error)})"
+                f"Path accessibility check: {path} -> False (cannot load with nibabel: {str(load_error)})"
             )
             return {"accessible": False}
 
@@ -351,7 +202,7 @@ async def check_image_path_accessible(path: str):
         logger.error("Path accessibility check failed: nibabel is not installed")
         return {"accessible": False}
     except Exception as e:
-        logger.error(f"Error checking path accessibility: {str(e)}")
+        logger.error(f"Error checking path accessibility for {path}: {str(e)}")
         return {"accessible": False}
 
 
@@ -363,37 +214,10 @@ async def check_roi_exists(roi_hash: str):
 
 @app.post("/set_active_image/{image_hash}")
 async def set_active_image(
-    image_hash: str,
-    clim0: float = Form(None),
-    clim1: float = Form(None),
-    slope: float = Form(1.0),
-    offset: float = Form(0.0),
+    image_hash: str, pm: PromptManager = Depends(ensure_active_image)
 ):
-    """
-    Sets the active image for the global prompt manager from the cache.
-    Optionally applies histogram trimming if clim0 and clim1 are provided.
-    """
-    if clim0 is not None and clim1 is not None:
-        pm = await ensure_active_image(image_hash, clim0, clim1, slope, offset)
-        return {
-            "status": "ok",
-            "message": f"Active image set to {image_hash} with histogram trimming [{clim0}, {clim1}] (slope={slope}, offset={offset})",
-        }
-    else:
-        # Load without histogram trimming (use full range)
-        image_data = IMAGE_CACHE.get(image_hash)
-        if image_data is None:
-            raise HTTPException(
-                status_code=404, detail=f"Image {image_hash} not found in cache"
-            )
-        PROMPT_MANAGER.set_image(image_data)
-        global CURRENT_IMAGE_HASH, CURRENT_CLIM0, CURRENT_CLIM1, CURRENT_SLOPE, CURRENT_OFFSET
-        CURRENT_IMAGE_HASH = image_hash
-        CURRENT_CLIM0 = None
-        CURRENT_CLIM1 = None
-        CURRENT_SLOPE = None
-        CURRENT_OFFSET = None
-        return {"status": "ok", "message": f"Active image set to {image_hash} (no trimming)"}
+    """Sets the active image for the global prompt manager from the cache."""
+    return {"status": "ok", "message": f"Active image set to {image_hash}"}
 
 
 @app.post("/reset_interactions")
@@ -464,27 +288,30 @@ async def upload_image(
     if absolute_path:
         logger.info(f"Loading image from server path: {absolute_path}")
         try:
-            # Extract the actual path (remove the timestamp prefix if present)
-            file_path = parse_filepath_with_timestamp(absolute_path)
-            logger.info(f"Parsed file path: '{file_path}'")
 
+            # Extract the actual path (remove the timestamp prefix if present)
+            path = absolute_path.strip()
+            logger.info(f"recieved path : '{path}'")
+
+            if " " in path:
+                # Split and take the last part (the actual file path)
+                path = path.split(maxsplit=1)[1]
+
+            file_path = Path(path)
             if not file_path.exists():
                 raise HTTPException(
-                    status_code=404, detail=f"Image file not found: {file_path}"
+                    status_code=404, detail=f"Image file not found: {absolute_path}"
                 )
             if not file_path.is_file():
                 raise HTTPException(
-                    status_code=400, detail=f"Path is not a file: {file_path}"
+                    status_code=400, detail=f"Path is not a file: {absolute_path}"
                 )
 
             # Load the image using nibabel
             nib_img = nib.load(str(file_path))
-            # NiBabel returns data in (x, y, z) order, but client expects (z, y, x)
-            # Transpose to match the expected array format
             img_array = nib_img.get_fdata().astype(np.float32)
-            img_array = np.transpose(img_array, (2, 1, 0))  # (x, y, z) -> (z, y, x)
             logger.info(
-                f"Loaded image from path - shape: {img_array.shape} (transposed to z,y,x), dtype: {img_array.dtype}"
+                f"Loaded image from path - shape: {img_array.shape}, dtype: {img_array.dtype}"
             )
 
         except ImportError:
@@ -580,10 +407,6 @@ async def add_roi_interaction(
     roi_hash: str = Form(...),
     roi_uuid: str = Form(...),
     roi_has_changed: str = Form(...),
-    clim0: float = Form(...),
-    clim1: float = Form(...),
-    slope: float = Form(1.0),
-    offset: float = Form(0.0),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
@@ -592,20 +415,40 @@ async def add_roi_interaction(
     Similar to bbox/scribble interactions but uses the ROI as the only prompt.
     """
     logger.info(
-        f"=== ADD ROI INTERACTION START === image: {image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}, clim: [{clim0}, {clim1}], slope: {slope}, offset: {offset}"
+        f"=== ADD ROI INTERACTION START === image: {image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}"
     )
     log_memory_usage("BEFORE")
 
-    pm = await ensure_active_image(image_hash, clim0, clim1, slope, offset)
+    pm = await ensure_active_image(image_hash)
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
-    check_and_reset_interactions(roi_uuid, roi_has_changed_bool)
-
-    # Load ROI from cache or upload
-    roi_array = await load_roi_from_cache_or_upload(
-        roi_hash, file, shape, dtype, compressed, "roi interaction"
+    interactions_were_reset = check_and_reset_interactions(
+        roi_uuid, roi_has_changed_bool
     )
+
+    # Check if ROI is already cached
+    cached_roi = ROI_CACHE.get(roi_hash)
+    if cached_roi is not None:
+        logger.info(f"ROI {roi_hash} found in cache for roi interaction.")
+        roi_array = cached_roi
+    else:
+        if file is None:
+            raise HTTPException(
+                status_code=400, detail="ROI not in cache and no file provided"
+            )
+
+        binary_data = await file.read()
+        shape_tuple = tuple(json.loads(shape))
+        is_compressed = compressed == "gzip"
+        roi_array = deserialize_array(
+            binary_data, shape_tuple, dtype, compressed=is_compressed
+        )
+        logger.info(
+            f"Uploaded ROI details - shape: {roi_array.shape}, dtype: {roi_array.dtype}, min: {roi_array.min()}, max: {roi_array.max()}"
+        )
+        # Cache the ROI
+        ROI_CACHE.set(roi_hash, roi_array)
 
     # Set the roi in the prompt manager and run prediction
     # Note: set_segment is always called for roi_interaction endpoint since the ROI itself is the prompt
@@ -642,10 +485,6 @@ async def add_bbox_interaction(
     roi_hash: str = Form(...),
     roi_uuid: str = Form(...),
     roi_has_changed: str = Form(...),
-    clim0: float = Form(...),
-    clim1: float = Form(...),
-    slope: float = Form(1.0),
-    offset: float = Form(0.0),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
@@ -656,12 +495,12 @@ async def add_bbox_interaction(
     # Parse interaction parameters from JSON string
     bbox_params = BBoxParams(**json.loads(params))
     logger.info(
-        f"=== ADD BBOX INTERACTION START === image: {bbox_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}, clim: [{clim0}, {clim1}], slope: {slope}, offset: {offset}"
+        f"=== ADD BBOX INTERACTION START === image: {bbox_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}"
     )
     log_memory_usage("BEFORE")
 
     # Ensure the correct image is active
-    pm = await ensure_active_image(bbox_params.image_hash, clim0, clim1, slope, offset)
+    pm = await ensure_active_image(bbox_params.image_hash)
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
@@ -672,10 +511,24 @@ async def add_bbox_interaction(
     # --- Process the uploaded ROI mask ---
     # Only load and set ROI if interactions were reset (otherwise we preserve existing interactions)
     if interactions_were_reset:
-        # Load ROI from cache or upload
-        roi_array = await load_roi_from_cache_or_upload(
-            roi_hash, file, shape, dtype, compressed, "bbox interaction"
-        )
+        # Check if ROI is already cached
+        cached_roi = ROI_CACHE.get(roi_hash)
+        if cached_roi is not None:
+            logger.info(f"ROI {roi_hash} found in cache for bbox interaction.")
+            roi_array = cached_roi
+        else:
+            if file is None:
+                raise HTTPException(
+                    status_code=400, detail="ROI not in cache and no file provided"
+                )
+            binary_data = await file.read()
+            shape_tuple = tuple(json.loads(shape))
+            is_compressed = compressed == "gzip"
+            roi_array = deserialize_array(
+                binary_data, shape_tuple, dtype, compressed=is_compressed
+            )
+            # Cache the ROI
+            ROI_CACHE.set(roi_hash, roi_array)
 
         # Set the base ROI mask in the prompt manager without running prediction yet
         pm.set_segment(roi_array, run_prediction=False)
@@ -721,10 +574,6 @@ async def add_scribble_interaction(
     roi_hash: str = Form(...),
     roi_uuid: str = Form(...),
     roi_has_changed: str = Form(...),
-    clim0: float = Form(...),
-    clim1: float = Form(...),
-    slope: float = Form(1.0),
-    offset: float = Form(0.0),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
@@ -735,7 +584,7 @@ async def add_scribble_interaction(
     # Parse interaction parameters from JSON string
     scribble_params = ScribbleParams(**json.loads(params))
     logger.info(
-        f"=== ADD SCRIBBLE INTERACTION START === image: {scribble_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}, clim: [{clim0}, {clim1}], slope: {slope}, offset: {offset}"
+        f"=== ADD SCRIBBLE INTERACTION START === image: {scribble_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}"
     )
     logger.info(
         f"Scribble details: {len(scribble_params.scribble_coords)} points, label: {scribble_params.scribble_labels[0]}"
@@ -743,7 +592,7 @@ async def add_scribble_interaction(
     log_memory_usage("BEFORE")
 
     # Ensure the correct image is active
-    pm = await ensure_active_image(scribble_params.image_hash, clim0, clim1, slope, offset)
+    pm = await ensure_active_image(scribble_params.image_hash)
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
@@ -754,14 +603,26 @@ async def add_scribble_interaction(
     # --- Process the uploaded ROI mask ---
     # Only load and set ROI if interactions were reset (otherwise we preserve existing interactions)
     if interactions_were_reset:
-        # Load ROI from cache or upload
-        roi_array = await load_roi_from_cache_or_upload(
-            roi_hash, file, shape, dtype, compressed, "scribble interaction"
-        )
-
-        # Debug visualization
-        mean_roi_slice = np.mean(roi_array, axis=0)
-        plt.imsave("mean_roi_slice.png", mean_roi_slice)
+        # Check if ROI is already cached
+        cached_roi = ROI_CACHE.get(roi_hash)
+        if cached_roi is not None:
+            logger.info(f"ROI {roi_hash} found in cache for scribble interaction.")
+            roi_array = cached_roi
+        else:
+            if file is None:
+                raise HTTPException(
+                    status_code=400, detail="ROI not in cache and no file provided"
+                )
+            binary_data = await file.read()
+            shape_tuple = tuple(json.loads(shape))
+            is_compressed = compressed == "gzip"
+            roi_array = deserialize_array(
+                binary_data, shape_tuple, dtype, compressed=is_compressed
+            )
+            mean_roi_slice = np.mean(roi_array, axis=0)
+            plt.imsave("mean_roi_slice.png", mean_roi_slice)
+            # Cache the ROI
+            ROI_CACHE.set(roi_hash, roi_array)
 
         # Set the base ROI mask in the prompt manager without running prediction yet
         pm.set_segment(roi_array, run_prediction=False)
@@ -814,10 +675,6 @@ async def add_point_interaction(
     roi_hash: str = Form(...),
     roi_uuid: str = Form(...),
     roi_has_changed: str = Form(...),
-    clim0: float = Form(...),
-    clim1: float = Form(...),
-    slope: float = Form(1.0),
-    offset: float = Form(0.0),
     file: UploadFile = File(None),
     compressed: str = Form(None),
 ):
@@ -829,7 +686,7 @@ async def add_point_interaction(
     # Parse interaction parameters from JSON string
     point_params = PointParams(**json.loads(params))
     logger.info(
-        f"=== ADD POINT INTERACTION START === image: {point_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}, clim: [{clim0}, {clim1}], slope: {slope}, offset: {offset}"
+        f"=== ADD POINT INTERACTION START === image: {point_params.image_hash}, roi: {roi_hash}, uuid: {roi_uuid}, changed: {roi_has_changed}"
     )
     logger.info(
         f"Number of points: {len(point_params.point_coords)}, coords: {point_params.point_coords}, labels: {point_params.point_labels}"
@@ -844,7 +701,7 @@ async def add_point_interaction(
         )
 
     # Ensure the correct image is active
-    pm = await ensure_active_image(point_params.image_hash, clim0, clim1, slope, offset)
+    pm = await ensure_active_image(point_params.image_hash)
 
     # Check if interactions should be reset
     roi_has_changed_bool = roi_has_changed.lower() == "true"
@@ -855,10 +712,24 @@ async def add_point_interaction(
     # --- Process the uploaded ROI mask ---
     # Only load and set ROI if interactions were reset (otherwise we preserve existing interactions)
     if interactions_were_reset:
-        # Load ROI from cache or upload
-        roi_array = await load_roi_from_cache_or_upload(
-            roi_hash, file, shape, dtype, compressed, "point interaction"
-        )
+        # Check if ROI is already cached
+        cached_roi = ROI_CACHE.get(roi_hash)
+        if cached_roi is not None:
+            logger.info(f"ROI {roi_hash} found in cache for point interaction.")
+            roi_array = cached_roi
+        else:
+            if file is None:
+                raise HTTPException(
+                    status_code=400, detail="ROI not in cache and no file provided"
+                )
+            binary_data = await file.read()
+            shape_tuple = tuple(json.loads(shape))
+            is_compressed = compressed == "gzip"
+            roi_array = deserialize_array(
+                binary_data, shape_tuple, dtype, compressed=is_compressed
+            )
+            # Cache the ROI
+            ROI_CACHE.set(roi_hash, roi_array)
 
         # Set the base ROI mask in the prompt manager without running prediction yet
         pm.set_segment(roi_array, run_prediction=False)
@@ -996,7 +867,7 @@ def main():
         port=args.port,
         ssl_keyfile=args.ssl_keyfile,
         ssl_certfile=args.ssl_certfile,
-        reload=False,
+        reload=True,
         reload_excludes=["logs/*", "data/*", ".venv/*"],
         # reload_dirs=os.path.dirname(os.path.abspath(__file__))
     )
